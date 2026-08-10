@@ -1,0 +1,8 @@
+{
+  "tiny.dxf": 8,
+  "pathological.dxf": 8,
+  "precision.dxf": 5,
+  "small.dxf": 10000,
+  "blocks.dxf": 100000,
+  "crs-points.json": 10000
+}

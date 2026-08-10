@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    // Workspace packages resolve through pnpm links at runtime; these paths keep `tsc` and
+    // editors working identically before and after `pnpm install`.
+    "paths": {
+      "@wcad/geo-core": ["packages/geo-core/src/index.ts"],
+      "@wcad/store-contract": ["packages/store-contract/src/index.ts"]
+    },
+    "types": ["node"]
+  },
+  "include": ["packages/**/*.ts", "tools/**/*.ts"],
+  "exclude": ["node_modules", "**/dist", "apps/web"]
+}

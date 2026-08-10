@@ -1,0 +1,47 @@
+name: CI
+
+# Gate structure from IMPLEMENTATION-PLAN.md section 1.6. The gates exist from day one, before
+# there is any pressure to skip them.
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  commit-gate:
+    name: Commit gate (target < 10 min)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9.12.0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Architectural boundaries (G1)
+        run: pnpm depcruise
+      - name: Unit, property and conformance tests
+        run: pnpm test
+      - name: Coverage thresholds
+        run: pnpm vitest run --coverage
+
+  python-gate:
+    name: Worker tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -r apps/workers/requirements.txt -r apps/workers/requirements-dev.txt
+      - run: pytest apps/workers -q
+
+  docker-gate:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose build web api
+
+  # Nightly performance budgets run on the large fixture; see IMPLEMENTATION-PLAN.md section 1.6.
+  # Enabled from Phase 2, when there is a render path to measure.

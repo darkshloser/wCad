@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+*.log
+.env
+fixtures/*.dxf
+!fixtures/tiny.dxf
+!fixtures/pathological.dxf
+!fixtures/precision.dxf
+__pycache__/
+.venv/

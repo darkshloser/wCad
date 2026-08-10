@@ -1,0 +1,127 @@
+# Development stack. Everything runs in containers; nothing needs to be installed on the host
+# beyond Docker itself.
+#
+#   make up      start the whole stack
+#   make test    run the test suite in a container
+#   make down    stop everything
+#
+# Production differences (TLS, replicas, PgBouncer, resource limits) live in
+# docker-compose.prod.yml, which overlays this file.
+
+name: wcad
+
+services:
+  postgis:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-wcad}
+      POSTGRES_USER: ${POSTGRES_USER:-wcad}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wcad_dev_password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgis/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-wcad} -d ${POSTGRES_DB:-wcad}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Valkey, not Redis. Redis left BSD in March 2024 (RSALv2/SSPL, plus AGPLv3 from Redis 8),
+  # none of which sits comfortably under a commercially licensed product. Valkey is the Linux
+  # Foundation fork of Redis 7.2.4, still BSD-3-Clause and wire-compatible.
+  # See THIRD-PARTY-LICENSES.md.
+  valkey:
+    image: valkey/valkey:8.1-alpine
+    command: ["valkey-server", "--appendonly", "yes"]
+    volumes:
+      - valkeydata:/data
+    ports:
+      - "${VALKEY_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Object storage is a plain mounted volume behind the ObjectStore interface.
+  #
+  # MinIO was the obvious choice and is deliberately not used: it is AGPL-3.0, and the project
+  # was archived in April 2026 after entering maintenance mode. For a single on-premise install
+  # a filesystem volume is simpler to run and to back up than an object store. If S3 semantics
+  # become necessary (horizontally scaling the tile cold cache), add SeaweedFS (Apache-2.0)
+  # as an ObjectStore adapter rather than reintroducing MinIO.
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+      target: dev
+    ports:
+      - "${WEB_PORT:-5173}:5173"
+    volumes:
+      - .:/app
+      - web_node_modules:/app/node_modules
+    environment:
+      VITE_API_URL: http://localhost:${API_PORT:-3000}
+    command: pnpm --filter @wcad/web dev
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+      target: dev
+    depends_on:
+      postgis:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-3000}:3000"
+    volumes:
+      - .:/app
+      - api_node_modules:/app/node_modules
+      - objectstore:/var/lib/wcad/objects
+    environment:
+      OBJECT_STORE_PATH: /var/lib/wcad/objects
+      DATABASE_URL: postgres://${POSTGRES_USER:-wcad}:${POSTGRES_PASSWORD:-wcad_dev_password}@postgis:5432/${POSTGRES_DB:-wcad}
+      VALKEY_URL: redis://valkey:6379
+      PORT: 3000
+
+  workers:
+    build:
+      context: .
+      dockerfile: docker/workers.Dockerfile
+    depends_on:
+      postgis:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    volumes:
+      - ./apps/workers:/app
+      - ./fixtures:/fixtures
+      - objectstore:/var/lib/wcad/objects
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-wcad}:${POSTGRES_PASSWORD:-wcad_dev_password}@postgis:5432/${POSTGRES_DB:-wcad}
+      VALKEY_URL: redis://valkey:6379
+
+  # One-shot test runner: `docker compose run --rm test`
+  test:
+    build:
+      context: .
+      dockerfile: docker/node.Dockerfile
+      target: dev
+    volumes:
+      - .:/app
+      - test_node_modules:/app/node_modules
+    command: pnpm test
+    profiles: ["tools"]
+
+volumes:
+  pgdata:
+  valkeydata:
+  objectstore:
+  web_node_modules:
+  api_node_modules:
+  test_node_modules:

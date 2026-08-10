@@ -1,0 +1,26 @@
+{
+  "name": "wcad",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.12.0",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:node": "node --experimental-strip-types --test packages/**/test/*.test.ts",
+    "typecheck": "tsc -b --noEmit",
+    "lint": "eslint .",
+    "depcruise": "depcruise --config .dependency-cruiser.cjs packages apps",
+    "dev": "pnpm --filter @wcad/web dev",
+    "build": "pnpm -r build",
+    "fixtures:generate": "node --experimental-strip-types tools/fixtures/generate.ts",
+    "fixtures:verify": "node --experimental-strip-types tools/fixtures/verify.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "dependency-cruiser": "^16.4.2",
+    "fast-check": "^3.23.1",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}
