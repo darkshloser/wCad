@@ -15,3 +15,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY apps/workers ./
 CMD ["python", "-m", "wcad_workers.main"]
+
+# Development target: adds the test toolchain. Kept as a separate stage so the production image
+# ships neither pytest nor hypothesis.
+FROM python:3.12-slim-bookworm AS dev
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gdal-bin libgdal-dev build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
+
+COPY apps/workers/requirements.txt apps/workers/requirements-dev.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-dev.txt
+
+COPY apps/workers ./
+CMD ["python", "-m", "wcad_workers.main"]

@@ -1,10 +1,11 @@
-// Copyright (c) 2026 Dobromir. All rights reserved.
-// SPDX-License-Identifier: BUSL-1.1
+// wCAD — CAD/GIS Web Application
+// Copyright (C) 2026 Dobromir
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Use of this file is governed by the Business Source License 1.1 found in the
-// LICENSE file at the root of this repository. Production use requires a
-// commercial license until the Change Date, after which the Change License
-// (Apache-2.0) applies.
+// This program is free software: you can redistribute it and/or modify it under
+// the terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option) any
+// later version. See the LICENSE file at the root of this repository.
 
 /**
  * Fixture generator (IMPLEMENTATION-PLAN.md section 2).
@@ -22,7 +23,12 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DxfWriter, type Entity } from './dxfWriter.ts';
-import { defaultRegistry } from '../../packages/geo-core/src/index.ts';
+import {
+  LOD_TOLERANCES,
+  type Coord2,
+  defaultRegistry,
+  simplify,
+} from '../../packages/geo-core/src/index.ts';
 
 const OUT_DIR = join(process.cwd(), 'fixtures');
 
@@ -234,6 +240,97 @@ function generateCrsPoints(): number {
   return total;
 }
 
+/**
+ * Generalization cases for cross-implementation parity.
+ *
+ * The importer writes the geom_lod1..3 columns using a Python port of `simplify`, while the client
+ * generalizes the working set with this TypeScript one. Two implementations of Douglas-Peucker
+ * that differ even slightly make the backdrop and the working set draw the same geometry
+ * differently — so the expected output is generated HERE, by the reference implementation, and the
+ * Python side is asserted against it rather than against a second opinion.
+ */
+function generateSimplifyCases(): number {
+  const rnd = mulberry32(20260823);
+  const cases: Array<{
+    name: string;
+    tolerance: number;
+    input: number[][];
+    expected: number[][];
+  }> = [];
+
+  const shapes: Array<{ name: string; points: Coord2[] }> = [];
+
+  // Straight line with collinear interior points: everything between the ends must collapse.
+  shapes.push({
+    name: 'collinear',
+    points: Array.from({ length: 50 }, (_, i) => [i * 10, i * 10] as Coord2),
+  });
+
+  // Dense arc: the classic case where tolerance decides the vertex count.
+  shapes.push({
+    name: 'arc',
+    points: Array.from({ length: 200 }, (_, i) => {
+      const t = (i / 199) * Math.PI;
+      return [500_000 + 300 * Math.cos(t), 4_650_000 + 300 * Math.sin(t)] as Coord2;
+    }),
+  });
+
+  // Realistic surveyed polyline at full projected magnitude, where float64 cancellation bites.
+  shapes.push({
+    name: 'survey',
+    points: Array.from({ length: 500 }, (_, i) => [
+      500_000 + i * 1.37 + rnd() * 2,
+      4_650_000 + Math.sin(i / 7) * 40 + rnd() * 2,
+    ] as Coord2),
+  });
+
+  // Spike: a single far-off vertex must survive every tolerance.
+  shapes.push({
+    name: 'spike',
+    points: [
+      [0, 0],
+      [10, 0],
+      [20, 5000],
+      [30, 0],
+      [40, 0],
+    ] as Coord2[],
+  });
+
+  // Duplicate consecutive points, which make the segment length zero.
+  shapes.push({
+    name: 'duplicates',
+    points: [
+      [0, 0],
+      [0, 0],
+      [10, 1],
+      [10, 1],
+      [20, 0],
+    ] as Coord2[],
+  });
+
+  // Degenerate inputs that must round-trip untouched.
+  shapes.push({ name: 'two-points', points: [[0, 0], [1, 1]] as Coord2[] });
+  shapes.push({ name: 'single-point', points: [[5, 5]] as Coord2[] });
+
+  for (const shape of shapes) {
+    for (const tolerance of [...LOD_TOLERANCES, 0.5]) {
+      cases.push({
+        name: `${shape.name}@${tolerance}`,
+        tolerance,
+        input: shape.points.map((p) => [p[0], p[1]]),
+        expected: simplify(shape.points, tolerance).map((p) => [p[0], p[1]]),
+      });
+    }
+  }
+
+  writeFileSync(
+    join(OUT_DIR, 'simplify-cases.json'),
+    JSON.stringify({ generatedBy: '@wcad/geo-core', cases }, null, 0),
+    'utf-8',
+  );
+  return cases.length;
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const entitiesArg = args.indexOf('--entities');
@@ -256,6 +353,7 @@ async function main(): Promise<void> {
   manifest['small.dxf'] = await generateDxf('small.dxf', 10_000, { blocks: 50 });
   manifest['blocks.dxf'] = await generateDxf('blocks.dxf', 100_000, { blocks: 500, seed: 7 });
   manifest['crs-points.json'] = generateCrsPoints();
+  manifest['simplify-cases.json'] = generateSimplifyCases();
 
   writeFileSync(join(OUT_DIR, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8');
 

@@ -1,10 +1,11 @@
-// Copyright (c) 2026 Dobromir. All rights reserved.
-// SPDX-License-Identifier: BUSL-1.1
+// wCAD — CAD/GIS Web Application
+// Copyright (C) 2026 Dobromir
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Use of this file is governed by the Business Source License 1.1 found in the
-// LICENSE file at the root of this repository. Production use requires a
-// commercial license until the Change Date, after which the Change License
-// (Apache-2.0) applies.
+// This program is free software: you can redistribute it and/or modify it under
+// the terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option) any
+// later version. See the LICENSE file at the root of this repository.
 
 import { Feature, Map as OlMap, View } from 'ol';
 import { Circle as CircleGeom, LineString, Point, Polygon } from 'ol/geom';
@@ -27,6 +28,9 @@ import {
   tessellate,
 } from '@wcad/geo-core';
 import type { Change, ElementRecord, GeometryStore } from '@wcad/store-contract';
+import { type TileScheme, createTileScheme } from '@wcad/tiling';
+import { createBackdropLayer } from './backdrop.ts';
+import { PerfMonitor, type PerfSnapshot } from './instrumentation.ts';
 
 export type ToolName = 'select' | 'point' | 'line' | 'polygon' | 'circle' | 'arc3';
 
@@ -35,6 +39,15 @@ export interface EngineEvents {
   onContextMenu(payload: { elementId: string; pixel: [number, number] } | null): void;
   onElementsChanged(): void;
   onStatus(message: string): void;
+}
+
+/**
+ * Backdrop configuration (Phase 2). When absent the map runs working-set only, which is what
+ * the Phase 1 demo did and what local-file mode does before its tiles are built.
+ */
+export interface BackdropConfig {
+  readonly tileServiceUrl: string;
+  readonly projectExtent: readonly [number, number, number, number];
 }
 
 const WORKING_STYLE = new Style({
@@ -58,8 +71,11 @@ const SNAP_STYLE = new Style({
  * with a declarative re-render model produces subtle interaction bugs, so the boundary is kept
  * explicit and narrow: React calls methods, the engine calls back through EngineEvents.
  *
- * Phase 1 scope: the working-set layer only. The tiled backdrop layer arrives in Phase 2, at
- * which point this class gains a second, deliberately non-editable source (principle P1).
+ * Two layers, deliberately separate (principle P1):
+ *   backdrop    — MVT tiles, quantized, generalized, read-only. Holds the millions of objects.
+ *   working set — authoritative float64 features. The only thing Draw, Modify and Snap touch.
+ *
+ * Hit-testing is filtered to the working set so a click can never select tile geometry.
  */
 export class CadEngine {
   #map: OlMap;
@@ -72,14 +88,29 @@ export class CadEngine {
   #arcClicks: Coord3[] = [];
   #tool: ToolName = 'select';
   #basemap: TileLayer<OSM>;
+  #perf = new PerfMonitor();
+  #scheme: TileScheme | null = null;
+
+  // Explicit fields, not constructor parameter properties. Vite's esbuild handles parameter
+  // properties, but the rest of the codebase runs under `node --experimental-strip-types`, which
+  // does not — keeping one style everywhere means this file stays safe to import from a tool.
+  readonly #store: GeometryStore;
+  #projectId: string;
+  #crsCode: string;
+  readonly #events: EngineEvents;
 
   constructor(
     target: HTMLElement,
-    private readonly store: GeometryStore,
-    private projectId: string,
-    private crsCode: string,
-    private readonly events: EngineEvents,
+    store: GeometryStore,
+    projectId: string,
+    crsCode: string,
+    events: EngineEvents,
+    backdrop?: BackdropConfig,
   ) {
+    this.#store = store;
+    this.#projectId = projectId;
+    this.#crsCode = crsCode;
+    this.#events = events;
     registerProjections();
 
     this.#basemap = new TileLayer({ source: new OSM(), visible: false, opacity: 0.6 });
@@ -87,19 +118,45 @@ export class CadEngine {
     const workingLayer = new VectorLayer({ source: this.#workingSource, style: WORKING_STYLE });
     const snapLayer = new VectorLayer({ source: this.#snapSource, style: SNAP_STYLE });
 
-    const projection = getProjection(this.crsCode) ?? undefined;
-    const def = defaultRegistry.get(this.crsCode);
+    const projection = getProjection(this.#crsCode) ?? undefined;
+    const def = defaultRegistry.get(this.#crsCode);
     const center: [number, number] = [
       (def.extent[0] + def.extent[2]) / 2,
       (def.extent[1] + def.extent[3]) / 2,
     ];
 
+    // The backdrop carries the millions of objects and is read-only by construction; the
+    // working set carries the handful the user can actually touch (principle P1).
+    const layers: Array<TileLayer<OSM> | VectorLayer<VectorSource<Feature>> | ReturnType<typeof createBackdropLayer>> =
+      [this.#basemap];
+
+    if (backdrop) {
+      this.#scheme = createTileScheme(this.#crsCode, backdrop.projectExtent as [number, number, number, number], {
+        maxZoom: 24,
+      });
+      layers.push(
+        createBackdropLayer({
+          scheme: this.#scheme,
+          projectId: this.#projectId,
+          tileServiceUrl: backdrop.tileServiceUrl,
+          onTileLoad: (ms) => this.#perf.recordTileLoad(ms),
+          onTileError: () => this.#perf.recordTileError(),
+        }),
+      );
+    }
+
+    workingLayer.setZIndex(10);
+    snapLayer.setZIndex(20);
+    layers.push(workingLayer, snapLayer);
+
     this.#map = new OlMap({
       target,
-      layers: [this.#basemap, workingLayer, snapLayer],
+      layers: layers as never,
       view: new View({ projection, center, zoom: 14 }),
       controls: [],
     });
+
+    this.#perf.start();
 
     this.#modify = new Modify({ source: this.#workingSource });
     this.#snap = new Snap({ features: this.#snapCollection });
@@ -108,7 +165,7 @@ export class CadEngine {
 
     this.#map.on('pointermove', (evt) => {
       const c = evt.coordinate;
-      this.events.onPointerMove([c[0]!, c[1]!, 0]);
+      this.#events.onPointerMove([c[0]!, c[1]!, 0]);
       void this.#refreshSnapCandidates();
     });
 
@@ -118,9 +175,17 @@ export class CadEngine {
       e.preventDefault();
       const browserEvent = e as MouseEvent;
       const pixel = this.#map.getEventPixel(browserEvent);
-      const hit = this.#map.forEachFeatureAtPixel(pixel, (f) => f as Feature, { hitTolerance: 6 });
+      // Measured: the interaction budget is 16 ms with zero network, at any drawing size.
+      const hit = this.#perf.measureHitTest(() =>
+        this.#map.forEachFeatureAtPixel(pixel, (f) => f as Feature, {
+          hitTolerance: 6,
+          // Never hit-test the backdrop: its coordinates are quantized, so a "selection" made
+          // from it would be subtly wrong and unfixable downstream.
+          layerFilter: (layer) => layer.getZIndex() === 10,
+        }),
+      );
       const id = hit?.get('elementId') as string | undefined;
-      this.events.onContextMenu(id ? { elementId: id, pixel: [browserEvent.clientX, browserEvent.clientY] } : null);
+      this.#events.onContextMenu(id ? { elementId: id, pixel: [browserEvent.clientX, browserEvent.clientY] } : null);
     });
 
     this.#modify.on('modifyend', (evt) => {
@@ -132,6 +197,15 @@ export class CadEngine {
 
   get map(): OlMap {
     return this.#map;
+  }
+
+  /** Live performance counters, matching the budgets in the architecture document. */
+  perfSnapshot(): PerfSnapshot {
+    return this.#perf.snapshot();
+  }
+
+  get tileScheme(): TileScheme | null {
+    return this.#scheme;
   }
 
   setBasemapVisible(visible: boolean): void {
@@ -148,12 +222,12 @@ export class CadEngine {
     this.#map.un('click', this.#onArcClick);
 
     if (tool === 'select') {
-      this.events.onStatus('Select mode. Right-click an element for properties.');
+      this.#events.onStatus('Select mode. Right-click an element for properties.');
       return;
     }
     if (tool === 'arc3') {
       this.#map.on('click', this.#onArcClick);
-      this.events.onStatus('Arc: click start, a point on the arc, then end.');
+      this.#events.onStatus('Arc: click start, a point on the arc, then end.');
       return;
     }
 
@@ -169,7 +243,7 @@ export class CadEngine {
     // Snap must be added after Draw so it processes pointer events first.
     this.#map.removeInteraction(this.#snap);
     this.#map.addInteraction(this.#snap);
-    this.events.onStatus(`${tool} tool active. Snapping to existing vertices is on.`);
+    this.#events.onStatus(`${tool} tool active. Snapping to existing vertices is on.`);
   }
 
   /** Adds a point from the typed command line, so typed and mouse entry share one path. */
@@ -180,10 +254,10 @@ export class CadEngine {
     }
     if (this.#draw) {
       this.#draw.appendCoordinates([[point[0], point[1]]]);
-      this.events.onStatus(`Appended ${point[0].toFixed(3)}, ${point[1].toFixed(3)}`);
+      this.#events.onStatus(`Appended ${point[0].toFixed(3)}, ${point[1].toFixed(3)}`);
       return;
     }
-    this.events.onStatus('Select a drawing tool before entering coordinates.');
+    this.#events.onStatus('Select a drawing tool before entering coordinates.');
   }
 
   finishDrawing(): void {
@@ -203,6 +277,7 @@ export class CadEngine {
   }
 
   dispose(): void {
+    this.#perf.stop();
     this.#map.setTarget(undefined);
   }
 
@@ -212,7 +287,7 @@ export class CadEngine {
 
   #onArcPoint(p: Coord3): void {
     this.#arcClicks.push(p);
-    this.events.onStatus(`Arc point ${this.#arcClicks.length} of 3 captured.`);
+    this.#events.onStatus(`Arc point ${this.#arcClicks.length} of 3 captured.`);
     if (this.#arcClicks.length < 3) return;
 
     const [a, b, c] = this.#arcClicks as [Coord3, Coord3, Coord3];
@@ -221,7 +296,7 @@ export class CadEngine {
     try {
       arc = arcFrom3Points([a[0], a[1]], [b[0], b[1]], [c[0], c[1]]);
     } catch (err) {
-      this.events.onStatus(`Arc rejected: ${(err as Error).message}`);
+      this.#events.onStatus(`Arc rejected: ${(err as Error).message}`);
       return;
     }
     void this.#persistArc(arc);
@@ -238,10 +313,10 @@ export class CadEngine {
     const change: Change = {
       op: 'create',
       element: {
-        projectId: this.projectId,
+        projectId: this.#projectId,
         layerId: 'default',
         kind: 'arc',
-        crs: this.crsCode,
+        crs: this.#crsCode,
         coords: [
           [pts[0]![0], pts[0]![1], 0],
           [pts[pts.length - 1]![0], pts[pts.length - 1]![1], 0],
@@ -256,13 +331,13 @@ export class CadEngine {
         },
       },
     };
-    const res = await this.store.commit(this.projectId, [change]);
+    const res = await this.#store.commit(this.#projectId, [change]);
     if (!res.ok) {
-      this.events.onStatus('Arc commit rejected.');
+      this.#events.onStatus('Arc commit rejected.');
       return;
     }
     await this.#reloadViewport();
-    this.events.onStatus(`Arc created (r = ${arc.radius.toFixed(3)}).`);
+    this.#events.onStatus(`Arc created (r = ${arc.radius.toFixed(3)}).`);
   }
 
   async #persistDrawn(feature: Feature): Promise<void> {
@@ -293,29 +368,29 @@ export class CadEngine {
       kind = 'circle';
       params = { cx: c[0]!, cy: c[1]!, r };
     } else {
-      this.events.onStatus('Unsupported geometry type.');
+      this.#events.onStatus('Unsupported geometry type.');
       return;
     }
 
-    const res = await this.store.commit(this.projectId, [
+    const res = await this.#store.commit(this.#projectId, [
       {
         op: 'create',
         element: {
-          projectId: this.projectId,
+          projectId: this.#projectId,
           layerId: 'default',
           kind,
-          crs: this.crsCode,
+          crs: this.#crsCode,
           coords,
           ...(params ? { params } : {}),
         },
       },
     ]);
     if (!res.ok) {
-      this.events.onStatus('Commit rejected.');
+      this.#events.onStatus('Commit rejected.');
       return;
     }
     await this.#reloadViewport();
-    this.events.onStatus(`${kind} created.`);
+    this.#events.onStatus(`${kind} created.`);
   }
 
   async #persistModified(features: Feature[]): Promise<void> {
@@ -333,9 +408,9 @@ export class CadEngine {
       changes.push({ op: 'update', id, baseVersion: version, element: { coords } });
     }
     if (changes.length === 0) return;
-    const res = await this.store.commit(this.projectId, changes);
+    const res = await this.#store.commit(this.#projectId, changes);
     if (!res.ok) {
-      this.events.onStatus(
+      this.#events.onStatus(
         `Edit rejected: element changed elsewhere (expected v${res.conflicts[0]?.expectedVersion}, found v${res.conflicts[0]?.actualVersion}). Reloading.`,
       );
     }
@@ -350,7 +425,7 @@ export class CadEngine {
 
   async #reloadViewport(): Promise<void> {
     const extent = this.#map.getView().calculateExtent(this.#map.getSize() ?? [800, 600]);
-    const records = await this.store.queryBBox(this.projectId, [
+    const records = await this.#store.queryBBox(this.#projectId, [
       extent[0]!,
       extent[1]!,
       extent[2]!,
@@ -362,7 +437,7 @@ export class CadEngine {
       const feature = toFeature(rec, tolerance);
       if (feature) this.#workingSource.addFeature(feature);
     }
-    this.events.onElementsChanged();
+    this.#events.onElementsChanged();
   }
 
   /**
@@ -381,7 +456,7 @@ export class CadEngine {
       centerCoord[0]! + margin,
       centerCoord[1]! + margin,
     ];
-    const candidates = await this.store.snapCandidates(this.projectId, bbox, 500);
+    const candidates = await this.#store.snapCandidates(this.#projectId, bbox, 500);
     this.#snapSource.clear();
     this.#snapCollection.clear();
     for (const c of candidates) {

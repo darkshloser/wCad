@@ -1,6 +1,8 @@
 # Third-Party Licenses
 
-wCAD is licensed under the Business Source License 1.1 (see `LICENSE`). Because the intent is to sell commercial production licenses, every dependency has to be checked for terms that would interfere with that. This document records the current position and the reasoning.
+wCAD is licensed under the GNU Affero General Public License v3 (see `LICENSE`). Because AGPL-3.0 is a strong copyleft licence, every dependency has to be checked for terms that are incompatible with it — and, if you later dual-license commercially, for terms that would interfere with that. This document records the current position and the reasoning.
+
+**Note on AGPL compatibility:** AGPL-3.0 can incorporate MIT, BSD, ISC and Apache-2.0 code without difficulty. It is *not* compatible with GPL-2.0-only code, which is why the PostGIS position below matters.
 
 **This is engineering diligence, not legal advice.** Before you sell a licence, have a lawyer review this list.
 
@@ -27,6 +29,9 @@ wCAD is licensed under the Business Source License 1.1 (see `LICENSE`). Because 
 | ~~Redis 7.4+ / 8.x~~ | RSALv2 / SSPLv1 / AGPLv3 | **Replaced with Valkey** |
 | ~~MinIO~~ | AGPL-3.0 **and archived April 2026** | **Removed** |
 | nginx | BSD-2-Clause | Safe |
+| node-postgres (`pg`) | MIT | Safe |
+| ioredis | MIT | Safe |
+| Testcontainers | MIT | Safe |
 | SeaweedFS (optional) | Apache-2.0 | Safe |
 
 ---

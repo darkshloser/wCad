@@ -1,0 +1,14 @@
+{
+  "name": "@wcad/tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "//": "Development tooling: fixture generation, bulk seeding, benchmarking. A real workspace package rather than loose scripts, because pnpm only links a workspace dependency into the node_modules of a package that DECLARES it. As loose files under a non-package directory, tools/*.ts had nowhere for '@wcad/geo-core' to resolve from under plain node -- it worked only under Vitest, which resolves workspace packages itself.",
+  "dependencies": {
+    "@wcad/geo-core": "workspace:*",
+    "@wcad/store-contract": "workspace:*",
+    "@wcad/store-postgis": "workspace:*",
+    "@wcad/tiling": "workspace:*",
+    "pg": "^8.13.1"
+  }
+}

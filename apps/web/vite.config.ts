@@ -1,10 +1,11 @@
-// Copyright (c) 2026 Dobromir. All rights reserved.
-// SPDX-License-Identifier: BUSL-1.1
+// wCAD — CAD/GIS Web Application
+// Copyright (C) 2026 Dobromir
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Use of this file is governed by the Business Source License 1.1 found in the
-// LICENSE file at the root of this repository. Production use requires a
-// commercial license until the Change Date, after which the Change License
-// (Apache-2.0) applies.
+// This program is free software: you can redistribute it and/or modify it under
+// the terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option) any
+// later version. See the LICENSE file at the root of this repository.
 
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
@@ -18,6 +19,7 @@ export default defineConfig({
     alias: {
       '@wcad/geo-core': r('../../packages/geo-core/src/index.ts'),
       '@wcad/store-contract': r('../../packages/store-contract/src/index.ts'),
+      '@wcad/tiling': r('../../packages/tiling/src/index.ts'),
     },
   },
   server: { host: '0.0.0.0', port: 5173, watch: { usePolling: true } },

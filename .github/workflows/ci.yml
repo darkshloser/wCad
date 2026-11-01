@@ -29,11 +29,46 @@ jobs:
   python-gate:
     name: Worker tests
     runs-on: ubuntu-latest
+
+    # A real PostGIS, not a mock. The queue's guarantees ARE database guarantees — SKIP LOCKED
+    # handing a job to exactly one worker, a checkpoint rolling back with the rows it describes —
+    # and none of them can be tested without one. Without this service those suites skip silently,
+    # which is worse than not having them.
+    services:
+      postgis:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_DB: wcad
+          POSTGRES_USER: wcad
+          POSTGRES_PASSWORD: wcad_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wcad -d wcad"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      DATABASE_URL: postgres://wcad:wcad_ci@localhost:5432/wcad
+      PGPASSWORD: wcad_ci
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - run: pip install -r apps/workers/requirements.txt -r apps/workers/requirements-dev.txt
+
+      - name: Apply the schema
+        run: psql -h localhost -U wcad -d wcad -v ON_ERROR_STOP=1 -f docker/postgis/init.sql
+
+      # Only tiny/pathological/precision.dxf are committed; small.dxf and blocks.dxf are generated,
+      # so the suites that need them skip unless they are built here.
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: corepack enable && pnpm install --no-frozen-lockfile
+      - run: pnpm fixtures:generate
+
       - run: pytest apps/workers -q
 
   docker-gate:
@@ -41,7 +76,45 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: docker compose build web api
+      - run: docker compose build web api tiles
 
-  # Nightly performance budgets run on the large fixture; see IMPLEMENTATION-PLAN.md section 1.6.
-  # Enabled from Phase 2, when there is a render path to measure.
+  integration-gate:
+    name: Integration (real PostGIS via Testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9.12.0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm vitest run --config vitest.integration.config.ts
+
+  budget-gate:
+    name: Performance budgets
+    runs-on: ubuntu-latest
+    # Runs on PRs and nightly rather than every commit: it seeds a real database and drives the
+    # tile service, so it is minutes rather than seconds.
+    if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9.12.0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: cp .env.example .env
+      - run: docker compose up -d --build postgis valkey tiles web
+      - name: Wait for the tile service
+        run: timeout 120 sh -c 'until curl -fsS http://localhost:3001/health; do sleep 2; done'
+      - run: pnpm fixtures:generate
+      - name: Seed
+        run: docker compose exec -T tiles node --experimental-strip-types tools/seed/loadFixture.ts --file fixtures/blocks.dxf
+      - name: Tile budgets
+        run: docker compose exec -T tiles node --experimental-strip-types tools/bench/tileBench.ts --url http://tiles:3001
+      - name: Render budgets
+        run: |
+          pnpm --filter @wcad/web exec playwright install --with-deps chromium
+          pnpm --filter @wcad/web exec playwright test
+      - if: always()
+        run: docker compose logs tiles | tail -100

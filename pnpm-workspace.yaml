@@ -2,3 +2,7 @@ packages:
   - 'packages/*'
   - 'apps/web'
   - 'apps/api'
+  - 'apps/tiles'
+  # Development tooling (fixtures, seeding, benchmarks). A workspace package so pnpm links the
+  # @wcad/* packages its scripts import into tools/node_modules, where plain `node` can find them.
+  - 'tools'

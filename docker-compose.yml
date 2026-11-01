@@ -65,6 +65,7 @@ services:
       - web_node_modules:/app/node_modules
     environment:
       VITE_API_URL: http://localhost:${API_PORT:-3000}
+      VITE_TILE_SERVICE_URL: http://localhost:${TILES_PORT:-3001}
     command: pnpm --filter @wcad/web dev
 
   api:
@@ -89,10 +90,38 @@ services:
       VALKEY_URL: redis://valkey:6379
       PORT: 3000
 
+  # Deployed separately from the API so heavy read traffic cannot starve edit traffic, and so
+  # it can be scaled by replica count alone. Reads from a replica when one is configured.
+  tiles:
+    build:
+      context: .
+      dockerfile: docker/tiles.Dockerfile
+      target: dev
+    depends_on:
+      postgis:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    ports:
+      - "${TILES_PORT:-3001}:3001"
+    volumes:
+      - .:/app
+      - tiles_node_modules:/app/node_modules
+      - objectstore:/var/lib/wcad/objects
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-wcad}:${POSTGRES_PASSWORD:-wcad_dev_password}@postgis:5432/${POSTGRES_DB:-wcad}
+      VALKEY_URL: redis://valkey:6379
+      TILE_CACHE_PATH: /var/lib/wcad/objects/tiles
+      PROJECT_SRID: ${PROJECT_SRID:-32635}
+      PORT: 3001
+
   workers:
     build:
       context: .
       dockerfile: docker/workers.Dockerfile
+      # The dev target carries pytest, so `wcad.ps1 test-workers` can run the Python suites
+      # against the real database without a second image.
+      target: dev
     depends_on:
       postgis:
         condition: service_healthy
@@ -101,21 +130,59 @@ services:
     volumes:
       - ./apps/workers:/app
       - ./fixtures:/fixtures
+      # Read-only: the workers apply migrations but must never be able to edit them.
+      - ./docker/postgis/migrations:/migrations:ro
       - objectstore:/var/lib/wcad/objects
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-wcad}:${POSTGRES_PASSWORD:-wcad_dev_password}@postgis:5432/${POSTGRES_DB:-wcad}
       VALKEY_URL: redis://valkey:6379
+      # So a finished import invalidates the tile service's cached project extents; without it a
+      # freshly imported project keeps the extent it had when the service last looked.
+      TILES_URL: http://tiles:3001
+      WEB_URL: http://localhost:${WEB_PORT:-5173}
+      PROJECT_SRID: ${PROJECT_SRID:-32635}
+    command: ["python", "-m", "wcad_workers.main", "worker"]
 
-  # One-shot test runner: `docker compose run --rm test`
+  # One-shot test runner. The Docker socket is mounted because the integration suites use
+  # Testcontainers, which starts a real PostGIS container — running those inside a container
+  # requires access to the host daemon. Unit tests do not need it, but sharing one image keeps
+  # the tooling simple.
   test:
     build:
       context: .
       dockerfile: docker/node.Dockerfile
       target: dev
+    depends_on:
+      postgis:
+        condition: service_healthy
     volumes:
       - .:/app
       - test_node_modules:/app/node_modules
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-wcad}:${POSTGRES_PASSWORD:-wcad_dev_password}@postgis:5432/${POSTGRES_DB:-wcad}
+      VALKEY_URL: redis://valkey:6379
+      # Testcontainers publishes ports on the host, so reach them via the host gateway.
+      TESTCONTAINERS_HOST_OVERRIDE: host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: pnpm test
+    profiles: ["tools"]
+
+  # Playwright runs against the already-running web and tile services.
+  e2e:
+    image: mcr.microsoft.com/playwright:v1.48.2-jammy
+    working_dir: /app
+    depends_on:
+      - web
+      - tiles
+    volumes:
+      - .:/app
+      - e2e_node_modules:/app/node_modules
+    environment:
+      WCAD_WEB_URL: http://web:5173
+      WCAD_TILES_URL: http://tiles:3001
+    command: sh -c "corepack enable && pnpm install && pnpm --filter @wcad/web exec playwright test"
     profiles: ["tools"]
 
 volumes:
@@ -124,4 +191,6 @@ volumes:
   objectstore:
   web_node_modules:
   api_node_modules:
+  tiles_node_modules:
   test_node_modules:
+  e2e_node_modules:

@@ -6,10 +6,12 @@
     // editors working identically before and after `pnpm install`.
     "paths": {
       "@wcad/geo-core": ["packages/geo-core/src/index.ts"],
-      "@wcad/store-contract": ["packages/store-contract/src/index.ts"]
+      "@wcad/store-contract": ["packages/store-contract/src/index.ts"],
+      "@wcad/tiling": ["packages/tiling/src/index.ts"],
+      "@wcad/store-postgis": ["packages/store-postgis/src/index.ts"]
     },
     "types": ["node"]
   },
-  "include": ["packages/**/*.ts", "tools/**/*.ts"],
+  "include": ["packages/**/*.ts", "tools/**/*.ts", "apps/tiles/**/*.ts"],
   "exclude": ["node_modules", "**/dist", "apps/web"]
 }

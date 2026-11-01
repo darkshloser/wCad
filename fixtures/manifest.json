@@ -4,5 +4,6 @@
   "precision.dxf": 5,
   "small.dxf": 10000,
   "blocks.dxf": 100000,
-  "crs-points.json": 10000
+  "crs-points.json": 10000,
+  "simplify-cases.json": 28
 }

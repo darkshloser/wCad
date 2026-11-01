@@ -1,0 +1,20 @@
+{
+  "name": "@wcad/tiles",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --experimental-strip-types --watch src/main.ts",
+    "start": "node --experimental-strip-types src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@wcad/geo-core": "workspace:*",
+    "@wcad/store-contract": "workspace:*",
+    "@wcad/store-postgis": "workspace:*",
+    "@wcad/tiling": "workspace:*",
+    "ioredis": "^5.4.1",
+    "pg": "^8.13.1"
+  }
+}

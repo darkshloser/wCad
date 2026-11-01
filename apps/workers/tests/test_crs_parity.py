@@ -9,13 +9,14 @@ The TypeScript side writes fixtures/crs-points.json; this test asserts pyproj ag
 within 1 mm.
 """
 
-# Copyright (c) 2026 Dobromir. All rights reserved.
-# SPDX-License-Identifier: BUSL-1.1
+# wCAD — CAD/GIS Web Application
+# Copyright (C) 2026 Dobromir
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Use of this file is governed by the Business Source License 1.1 found in the
-# LICENSE file at the root of this repository. Production use requires a
-# commercial license until the Change Date, after which the Change License
-# (Apache-2.0) applies.
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU Affero General Public License as published by the Free
+# Software Foundation, either version 3 of the License, or (at your option) any
+# later version. See the LICENSE file at the root of this repository.
 
 
 from __future__ import annotations
@@ -29,7 +30,11 @@ from pyproj import CRS, Transformer
 
 from wcad_workers.crs import CRS_DEFINITIONS
 
-FIXTURE = Path(__file__).resolve().parents[3] / "fixtures" / "crs-points.json"
+from conftest import FIXTURES_DIR
+
+# Resolved by conftest rather than by counting parent directories: apps/workers is mounted at
+# /app in the container, where walking up three levels leaves the filesystem entirely.
+FIXTURE = (FIXTURES_DIR / "crs-points.json") if FIXTURES_DIR else Path("crs-points.json")
 TOLERANCE_M = 0.001
 
 

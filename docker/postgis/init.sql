@@ -1,8 +1,8 @@
--- Copyright (c) 2026 Dobromir. All rights reserved.
--- SPDX-License-Identifier: BUSL-1.1
+-- wCAD — CAD/GIS Web Application
+-- Copyright (C) 2026 Dobromir
+-- SPDX-License-Identifier: AGPL-3.0-or-later
 --
--- Use of this file is governed by the Business Source License 1.1 found in the
--- LICENSE file at the root of this repository.
+-- See the LICENSE file at the root of this repository.
 
 -- wCAD initial schema (architecture doc section 4.2).
 --
@@ -16,6 +16,25 @@
 
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
+-- ---------------------------------------------------------------------------------------------
+-- Schema versioning.
+--
+-- This file is the BASELINE (version 000) and only ever runs on an empty data directory —
+-- PostgreSQL skips docker-entrypoint-initdb.d entirely once a database exists. Everything after
+-- the baseline lives in docker/postgis/migrations/ and is applied by `wcad.ps1 migrate`, which is
+-- also run automatically by `up`.
+--
+-- Editing this file alone changes nothing for anyone who already has a database, which is exactly
+-- how a schema change silently fails to reach the machines that matter.
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version    text        PRIMARY KEY,
+  applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('000_baseline')
+ON CONFLICT (version) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS projects (
   id            bigserial PRIMARY KEY,
@@ -31,6 +50,9 @@ CREATE TABLE IF NOT EXISTS layers (
   id             bigserial PRIMARY KEY,
   project_id     bigint      NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   name           text        NOT NULL,
+  -- Draw order and tile ranking priority. Lower is drawn and ranked first.
+  priority       integer     NOT NULL DEFAULT 100,
+  visible        boolean     NOT NULL DEFAULT true,
   style_defaults jsonb,
   -- Optional JSON Schema used to validate metadata written against this layer.
   metadata_schema jsonb,
@@ -71,6 +93,11 @@ CREATE TABLE IF NOT EXISTS elements (
   geom_lod2   geometry,
   geom_lod3   geometry,
   bbox        box2d       NOT NULL,
+  -- Precomputed bounding-box diagonal in CRS units. Drives per-tile importance ordering and
+  -- small-feature culling. Stored rather than computed per row: at 10M rows, calling
+  -- ST_BoundingDiagonal inside every tile query is the difference between hitting and missing
+  -- the 300 ms tile budget.
+  bbox_diag   double precision NOT NULL DEFAULT 0,
 
   block_id    bigint,
   transform   double precision[6],
@@ -90,15 +117,20 @@ CREATE TABLE IF NOT EXISTS elements (
 
 -- Append-only change log for audit and recovery. Distinct from client-side undo, which is a
 -- local command stack and never a server round trip.
+--
+-- The primary key is (id, at), not id alone: PostgreSQL requires every unique or primary key
+-- constraint on a partitioned table to include the partition key column, since uniqueness can
+-- only be enforced per-partition, not across the whole table.
 CREATE TABLE IF NOT EXISTS element_history (
-  id         bigserial PRIMARY KEY,
+  id         bigserial   NOT NULL,
   project_id bigint      NOT NULL,
   element_id bigint      NOT NULL,
   version    integer     NOT NULL,
   op         text        NOT NULL CHECK (op IN ('create', 'update', 'delete')),
   payload    jsonb,
   actor      bigint,
-  at         timestamptz NOT NULL DEFAULT now()
+  at         timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (id, at)
 ) PARTITION BY RANGE (at);
 
 CREATE TABLE IF NOT EXISTS dirty_tiles (
@@ -109,6 +141,128 @@ CREATE TABLE IF NOT EXISTS dirty_tiles (
   marked_at  timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (project_id, z, x, y)
 );
+
+-- ---------------------------------------------------------------------------------------------
+-- Job queue (architecture doc principle P6: everything large is a job, not a request).
+--
+-- The queue lives in PostgreSQL rather than in Valkey. The deciding argument is the chaos test:
+-- a worker killed mid-import must leave the queue and the imported rows agreeing with each other.
+-- With the queue in another process that is a distributed-consensus problem; here a stage
+-- checkpoint and the rows it describes commit in ONE transaction, so a killed worker rolls back
+-- to a state that is consistent by construction. `SELECT ... FOR UPDATE SKIP LOCKED` gives
+-- correct concurrent claiming, and at import volumes (jobs per hour, not per millisecond) the
+-- throughput ceiling is nowhere near relevant.
+
+CREATE TABLE IF NOT EXISTS import_jobs (
+  id            bigserial PRIMARY KEY,
+  project_id    bigint      REFERENCES projects(id) ON DELETE CASCADE,
+  kind          text        NOT NULL,
+  source_uri    text        NOT NULL,
+  source_bytes  bigint,
+  source_sha256 text,
+  params        jsonb       NOT NULL DEFAULT '{}'::jsonb,
+
+  status        text        NOT NULL DEFAULT 'queued'
+                CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'dead')),
+  priority      integer     NOT NULL DEFAULT 100,
+
+  -- Resumability: the stage a worker last committed, plus its opaque progress cursor. A restart
+  -- resumes from here rather than from the beginning.
+  stage         text        NOT NULL DEFAULT 'pending',
+  checkpoint    jsonb       NOT NULL DEFAULT '{}'::jsonb,
+
+  entities_total       bigint NOT NULL DEFAULT 0,
+  entities_imported    bigint NOT NULL DEFAULT 0,
+  entities_unsupported bigint NOT NULL DEFAULT 0,
+  -- Per-type counts of what could not be imported. Never silently dropped (plan section 7 step 4).
+  unsupported_detail   jsonb  NOT NULL DEFAULT '{}'::jsonb,
+  errors               jsonb  NOT NULL DEFAULT '[]'::jsonb,
+
+  attempts      integer     NOT NULL DEFAULT 0,
+  max_attempts  integer     NOT NULL DEFAULT 3,
+
+  -- Liveness. A worker that dies without releasing its claim is reclaimed once this goes stale,
+  -- which is why claiming checks the heartbeat rather than the status alone.
+  claimed_by    text,
+  claimed_at    timestamptz,
+  heartbeat_at  timestamptz,
+
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  started_at    timestamptz,
+  finished_at   timestamptz
+);
+
+-- Supports the claim query's ordering without scanning finished jobs.
+CREATE INDEX IF NOT EXISTS import_jobs_claimable
+  ON import_jobs (priority ASC, id ASC)
+  WHERE status IN ('queued', 'running');
+
+CREATE INDEX IF NOT EXISTS import_jobs_project ON import_jobs (project_id, created_at DESC);
+
+-- Append-only progress log, for operators watching a long import and for post-mortems.
+CREATE TABLE IF NOT EXISTS job_events (
+  id       bigserial PRIMARY KEY,
+  job_id   bigint      NOT NULL REFERENCES import_jobs(id) ON DELETE CASCADE,
+  at       timestamptz NOT NULL DEFAULT now(),
+  level    text        NOT NULL DEFAULT 'info' CHECK (level IN ('info', 'warn', 'error')),
+  stage    text,
+  message  text        NOT NULL,
+  detail   jsonb
+);
+
+CREATE INDEX IF NOT EXISTS job_events_job ON job_events (job_id, id DESC);
+
+/**
+ * Claims one job, atomically.
+ *
+ * Takes queued jobs, and running jobs whose worker has stopped heartbeating (a crashed worker
+ * must not strand its job forever). SKIP LOCKED lets N workers claim concurrently without
+ * blocking each other or handing the same job to two of them.
+ */
+CREATE OR REPLACE FUNCTION claim_import_job(p_worker text, p_stale_after interval DEFAULT '60 seconds')
+RETURNS import_jobs LANGUAGE plpgsql AS $$
+DECLARE
+  claimed import_jobs;
+BEGIN
+  WITH candidate AS (
+    SELECT id FROM import_jobs
+     WHERE (status = 'queued')
+        OR (status = 'running' AND heartbeat_at < now() - p_stale_after)
+     ORDER BY priority ASC, id ASC
+     FOR UPDATE SKIP LOCKED
+     LIMIT 1
+  )
+  UPDATE import_jobs j
+     SET status       = 'running',
+         attempts     = j.attempts + 1,
+         claimed_by   = p_worker,
+         claimed_at   = now(),
+         heartbeat_at = now(),
+         started_at   = COALESCE(j.started_at, now())
+    FROM candidate c
+   WHERE j.id = c.id
+   RETURNING j.* INTO claimed;
+
+  RETURN claimed;
+END;
+$$;
+
+/**
+ * Records a resumable checkpoint.
+ *
+ * Called inside the same transaction as the batch of rows it describes, so the checkpoint and the
+ * data it refers to can never disagree — the property the chaos tests exercise.
+ */
+CREATE OR REPLACE FUNCTION checkpoint_import_job(
+  p_job_id bigint, p_stage text, p_checkpoint jsonb, p_imported bigint
+) RETURNS void LANGUAGE sql AS $$
+  UPDATE import_jobs
+     SET stage             = p_stage,
+         checkpoint        = p_checkpoint,
+         entities_imported = p_imported,
+         heartbeat_at      = now()
+   WHERE id = p_job_id;
+$$;
 
 -- Creates a project together with its own partition. Partition creation is deliberately part
 -- of project creation so no code path can insert into an unpartitioned table.
@@ -129,6 +283,14 @@ BEGIN
     'CREATE INDEX elements_p%s_meta_gin ON elements_p%s USING GIN (metadata jsonb_path_ops)', new_id, new_id);
   EXECUTE format(
     'CREATE INDEX elements_p%s_layer ON elements_p%s (layer_id) WHERE deleted_at IS NULL', new_id, new_id);
+  -- Supports the tile query's ORDER BY bbox_diag DESC within a layer.
+  EXECUTE format(
+    'CREATE INDEX elements_p%s_tile ON elements_p%s (layer_id, bbox_diag DESC) WHERE deleted_at IS NULL',
+    new_id, new_id);
+  EXECUTE format(
+    'CREATE INDEX elements_p%s_lod2_gist ON elements_p%s USING GIST (geom_lod2)', new_id, new_id);
+  EXECUTE format(
+    'CREATE INDEX elements_p%s_lod3_gist ON elements_p%s USING GIST (geom_lod3)', new_id, new_id);
 
   RETURN new_id;
 END;

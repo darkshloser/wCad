@@ -2,6 +2,8 @@
   "name": "wcad",
   "version": "0.1.0",
   "private": true,
+  "//type": "Without this, tools/ scripts run under --experimental-strip-types are parsed as CommonJS, fail, and are silently reparsed as ESM with a warning and a performance penalty. The only CommonJS file in the repo is .dependency-cruiser.cjs, whose extension already says so.",
+  "type": "module",
   "packageManager": "pnpm@9.12.0",
   "engines": { "node": ">=22" },
   "scripts": {

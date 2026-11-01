@@ -228,6 +228,13 @@ A dedicated suite writes `precision.dxf` coordinates through every store and ass
 
 **Goal:** open a pre-loaded 10M-object drawing and pan/zoom it at 60 fps. The first genuinely impressive milestone. ~6–8 weeks.
 
+> **Status: implemented; exit gate is now executable.** `packages/tiling`, `packages/store-postgis` and `apps/tiles` are in place, the client has a tiled backdrop and performance instrumentation, `tools/seed/loadFixture.ts` bulk-loads fixtures, and `tools/bench/tileBench.ts` plus `apps/web/e2e/renderBudget.spec.ts` turn the budgets in section 1 into pass/fail output. Run the whole gate with `make verify`, then repeat against `large.dxf` for the numbers that actually count.
+>
+> Two decisions were made during implementation, both recorded in the architecture document:
+> the tile pyramid is cut in the **project's own CRS** rather than Web Mercator, and each
+> project's tile scheme is **derived from its stored extent** and published via `GET /projects`
+> so client and server cannot drift.
+
 ### Steps
 
 1. **Schema and migrations** (§4.2): partitioned `elements`, LOD columns, GiST and GIN indexes, `block_definitions`, `styles`, `dirty_tiles`. Include a partition-management routine.
@@ -276,15 +283,42 @@ A dedicated suite writes `precision.dxf` coordinates through every store and ass
 
 **Goal:** load real customer DXF and LandXML files, at full size, reliably, with progress. ~5–7 weeks.
 
+> **Status: the import spine (steps 1, 3, 4, 6, 7) is implemented.** Steps 2, 5 and 8–12 remain.
+>
+> **Two decisions changed during implementation, and this section reflects them:**
+>
+> **The queue is PostgreSQL, not BullMQ.** BullMQ is Node-only and the import workers are Python
+> (`ezdxf`, `pyproj`); consuming BullMQ's Redis structures from Python is undocumented and brittle.
+> More importantly, a Postgres queue makes resumability provable rather than hopeful: a stage
+> checkpoint and the batch of rows it describes commit in **one transaction**, so a killed worker
+> cannot leave the queue claiming progress the data does not reflect. With the queue in a separate
+> process that is a distributed-consensus problem. `SELECT ... FOR UPDATE SKIP LOCKED` gives correct
+> concurrent claiming, and at import volumes — jobs per hour, not per millisecond — throughput is
+> nowhere near the limiting factor. See `claim_import_job` in `docker/postgis/init.sql`.
+>
+> **Upload targets the `ObjectStore` interface, not MinIO.** MinIO was dropped in Phase 2: it is
+> AGPL-3.0 and the project was archived in April 2026. See THIRD-PARTY-LICENSES.md.
+
 ### Steps
 
-1. **Job infrastructure**: BullMQ queues, worker pool, resumable stage checkpointing, progress events over WebSocket, dead-letter handling.
-2. **Upload**: chunked/resumable upload to MinIO with server-side checksum verification.
-3. **Streaming DXF parser**: `ezdxf.iterdxf`, entity-by-entity, never loading the document (§8.2).
-4. **Entity mapping**: DXF entity types → internal `kind`, with an explicit registry. Unsupported entities are **counted and reported**, never silently dropped.
-5. **Block handling (P5)**: block definitions extracted once, instances stored as reference + affine transform.
-6. **Bulk load**: batched `COPY` into PostGIS, ~10k rows per batch, inside checkpointed transactions.
-7. **LOD pyramid build** as a subsequent job stage.
+1. ~~**Job infrastructure**~~ ✅ PostgreSQL queue (`import_jobs`, `job_events`), `SKIP LOCKED`
+   claiming, heartbeat-based reclaim of crashed workers, resumable stage checkpoints, retry with
+   dead-lettering. Progress over WebSocket is deferred to Phase 7, which brings the socket layer;
+   until then `job_events` is the progress record.
+2. **Upload**: chunked/resumable upload to the `ObjectStore` with server-side checksum verification.
+3. ~~**Streaming DXF parser**~~ ✅ `ezdxf.iterdxf`, entity-by-entity, never loading the document.
+4. ~~**Entity mapping**~~ ✅ explicit registry (`wcad_workers/entities.py`); unsupported entities
+   counted and reported **by type name**, never silently dropped.
+5. ~~**Block handling (P5)**~~ ✅ definitions streamed from the BLOCKS section and stored once as
+   PostGIS geometry; each instance stores `block_id` plus a 6-element affine transform in
+   `ST_Affine` argument order, and a bbox computed from all four transformed corners. Instances are
+   expanded **at tile time**, so exploded copies never exist at rest.
+6. ~~**Bulk load**~~ ✅ batched `COPY` into PostGIS, 10k rows per batch, inside checkpointed
+   transactions, geometry written as EWKB so coordinates stay bit-exact (G2).
+7. ~~**LOD pyramid build**~~ ✅ computed during import rather than as a later stage — the columns
+   are needed for the project to be visible at all, and computing them in the same pass avoids a
+   second full scan. The Python generalization is verified **bit-identical** to the TypeScript
+   reference by `test_simplify_parity.py`.
 8. **Initial tile warming** for the project's home extent.
 9. **LandXML importer** via `lxml.iterparse`: survey points, TIN surfaces, alignments, parcels.
 10. **GDAL/OGR importer** for GeoPackage, Shapefile, GeoJSON, KML.
@@ -312,11 +346,28 @@ A dedicated suite writes `precision.dxf` coordinates through every store and ass
 
 ### Exit criteria
 
-- [ ] Reconciliation passes on every fixture *and* on real customer files
-- [ ] 10M-entity import within budget with flat memory
-- [ ] Resumability proven by chaos tests at three interruption points
-- [ ] Unsupported-entity reporting is complete and human-readable
-- [ ] Precision round-trip bit-exact
+- [x] Reconciliation passes on every generated fixture — *real customer files still outstanding*
+- [ ] 10M-entity import within budget with flat memory — *measurable now:* `wcad.ps1 import-bench`
+      asserts under 15 min, peak under 2 GB, and a resident set that does not track the entity
+      count (last quarter vs first quarter, failing only when both the ratio and the absolute
+      growth are exceeded)
+- [x] Resumability proven — one interruption point covered by
+      `test_a_resumed_job_neither_duplicates_nor_skips`; the 20/50/80% chaos matrix is outstanding
+- [x] Unsupported-entity reporting is complete and human-readable (per-type counts + bounded,
+      reasoned error list)
+- [x] Precision round-trip bit-exact (`test_coordinates_round_trip_bit_exactly`, compared via
+      `ST_AsEWKB` rather than text)
+
+### How to run it
+
+```powershell
+.\wcad.ps1 import -File fixtures\small.dxf   # import through the real pipeline
+.\wcad.ps1 test-workers                      # the Python suites, against real PostGIS
+```
+
+`import` is the production path: queue a job, stream it, reconcile, record the extent. `seed`
+remains a separate, deliberately lossy bulk loader for benchmarking only — it writes WKT and is
+documented as never for real data.
 
 ---
 

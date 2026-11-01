@@ -81,3 +81,8 @@ button.primary { background: var(--accent); border-color: var(--accent); width: 
 }
 .status-bar .spacer { flex: 1; }
 .status-bar .message { color: var(--text); font-family: inherit; }
+
+.status-bar .perf { padding: 0 6px; border-left: 1px solid var(--border); }
+.status-bar .perf.good { color: #68d391; }
+.status-bar .perf.warn { color: #f6ad55; }
+.status-bar .perf.bad { color: #fc8181; }

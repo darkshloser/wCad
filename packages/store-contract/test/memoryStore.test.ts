@@ -1,13 +1,14 @@
-// Copyright (c) 2026 Dobromir. All rights reserved.
-// SPDX-License-Identifier: BUSL-1.1
+// wCAD — CAD/GIS Web Application
+// Copyright (C) 2026 Dobromir
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Use of this file is governed by the Business Source License 1.1 found in the
-// LICENSE file at the root of this repository. Production use requires a
-// commercial license until the Change Date, after which the Change License
-// (Apache-2.0) applies.
+// This program is free software: you can redistribute it and/or modify it under
+// the terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option) any
+// later version. See the LICENSE file at the root of this repository.
 
 import { describe, expect, it } from 'vitest';
-import { conformanceCases } from '../src/conformance.ts';
+import { DEFAULT_CONTEXT, conformanceCases } from '../src/conformance.ts';
 import { MemoryStore } from '../src/memoryStore.ts';
 import { computeBBox } from '../src/memoryStore.ts';
 
@@ -20,7 +21,7 @@ describe('MemoryStore conformance', () => {
     it(c.name, async () => {
       const store = await MemoryStore.create();
       try {
-        await c.run(store);
+        await c.run(store, DEFAULT_CONTEXT);
       } finally {
         await store.close();
       }
