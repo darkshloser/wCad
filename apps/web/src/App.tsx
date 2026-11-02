@@ -18,7 +18,9 @@ import {
 } from '@wcad/geo-core';
 import { MemoryStore } from '@wcad/store-contract';
 import type { ElementRecord, GeometryStore } from '@wcad/store-contract';
-import { CadEngine, type ToolName } from './map/engine.ts';
+import { CadEngine, type ContextMenuRequest, type ToolName } from './map/engine.ts';
+import { type ViewSettings, loadViewSettings, saveViewSettings } from './viewSettings.ts';
+import { DEFAULT_TOOL } from './map/toolRules.ts';
 import type { PerfSnapshot } from './map/instrumentation.ts';
 import { Toolbar } from './components/Toolbar.tsx';
 import { PropertiesPanel } from './components/PropertiesPanel.tsx';
@@ -33,6 +35,15 @@ import { StatusBar } from './components/StatusBar.tsx';
 const TILE_SERVICE_URL = (import.meta.env['VITE_TILE_SERVICE_URL'] as string | undefined) ?? '';
 
 const LOCAL_PROJECT_ID = 'demo';
+
+/** localStorage, or undefined where merely touching it throws (some privacy modes). */
+function browserStorage(): Storage | undefined {
+  try {
+    return window.localStorage;
+  } catch {
+    return undefined;
+  }
+}
 
 interface ProjectInfo {
   id: string;
@@ -74,14 +85,21 @@ export function App() {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<CadEngine | null>(null);
   const storeRef = useRef<GeometryStore | null>(null);
+  const propertiesRequest = useRef<string | null>(null);
 
   const [crs, setCrs] = useState('EPSG:32635');
-  const [tool, setTool] = useState<ToolName>('select');
+  const [tool, setTool] = useState<ToolName>(DEFAULT_TOOL);
   const [cursor, setCursor] = useState<Coord3>([0, 0, 0]);
   const [status, setStatus] = useState('Ready.');
-  const [basemap, setBasemap] = useState(false);
-  const [selected, setSelected] = useState<ElementRecord | null>(null);
-  const [menuAt, setMenuAt] = useState<[number, number] | null>(null);
+  // View settings from the empty-space menu, remembered per browser (spec §4.1).
+  const [view, setView] = useState<ViewSettings>(() => loadViewSettings(browserStorage()));
+  const updateView = useCallback((patch: Partial<ViewSettings>) => setView((v) => ({ ...v, ...patch })), []);
+  const basemap = view.basemap;
+  // The properties panel opens only from the right-click menu, never on selection
+  // (knowledge/selection-spec.md §4), so it tracks its own object rather than the selection.
+  const [properties, setProperties] = useState<ElementRecord | null>(null);
+  const [menu, setMenu] = useState<ContextMenuRequest | null>(null);
+  const [selectedCount, setSelectedCount] = useState(0);
   const [count, setCount] = useState(0);
   const [lastPoint, setLastPoint] = useState<Coord3 | null>(null);
   const [perf, setPerf] = useState<PerfSnapshot | null>(null);
@@ -121,21 +139,16 @@ export function App() {
         project?.id ?? LOCAL_PROJECT_ID,
         crs,
         {
-        onPointerMove: setCursor,
-        onContextMenu: (payload) => {
-          if (!payload) {
-            setMenuAt(null);
-            setSelected(null);
-            return;
-          }
-          void (async () => {
-            const [rec] = await store.getExact([payload.elementId]);
-            if (!rec) return;
-            const metadata = await store.getMetadata(rec.id);
-            setSelected({ ...rec, metadata });
-            setMenuAt(payload.pixel);
-          })();
-        },
+          onPointerMove: setCursor,
+          // The engine has already applied the right-click selection rule; the menu needs only
+          // the object it acts on and a position.
+          onContextMenu: setMenu,
+          onSelectionChanged: (ids) => setSelectedCount(ids.length),
+          onElementsDeleted: (ids) => {
+            setMenu((m) => (m?.kind === 'object' && ids.includes(m.elementId) ? null : m));
+            setProperties((p) => (p && ids.includes(p.id) ? null : p));
+          },
+          onRequestTool: setTool,
           onElementsChanged: () => void store.count(LOCAL_PROJECT_ID).then(setCount),
           onStatus: setStatus,
         },
@@ -171,6 +184,20 @@ export function App() {
     engineRef.current?.setBasemapVisible(basemap);
   }, [basemap]);
 
+  useEffect(() => {
+    saveViewSettings(browserStorage(), view);
+  }, [view]);
+
+  // A closed menu no longer marks its object (spec §4).
+  useEffect(() => {
+    engineRef.current?.setMenuTarget(menu?.kind === 'object' ? menu.elementId : null);
+  }, [menu]);
+
+  // Switching tool closes any open menu.
+  useEffect(() => {
+    setMenu(null);
+  }, [tool]);
+
   const submitCoordinate = useCallback(
     (text: string) => {
       try {
@@ -186,6 +213,18 @@ export function App() {
     [lastPoint],
   );
 
+  const openProperties = useCallback(async (id: string) => {
+    const store = storeRef.current;
+    setMenu(null);
+    if (!store) return;
+    propertiesRequest.current = id;
+    const [rec] = await store.getExact([id]);
+    const metadata = rec ? await store.getMetadata(rec.id) : undefined;
+    // The store can be slower than the user: only the latest request may fill the panel.
+    if (propertiesRequest.current !== id) return;
+    setProperties(rec ? { ...rec, metadata: metadata ?? {} } : null);
+  }, []);
+
   const saveMetadata = useCallback(async (id: string, metadata: Record<string, unknown>) => {
     const store = storeRef.current;
     if (!store) return;
@@ -197,18 +236,15 @@ export function App() {
     setStatus(res.ok ? 'Metadata saved.' : 'Metadata rejected: element changed elsewhere.');
     if (res.ok) {
       const [updated] = await store.getExact([id]);
-      if (updated) setSelected({ ...updated, metadata });
+      if (updated) setProperties({ ...updated, metadata });
     }
   }, []);
 
-  const deleteSelected = useCallback(async () => {
-    const store = storeRef.current;
-    if (!store || !selected) return;
-    await store.commit(LOCAL_PROJECT_ID, [{ op: 'delete', id: selected.id, baseVersion: selected.version }]);
-    setSelected(null);
-    setMenuAt(null);
-    setStatus('Element deleted.');
-  }, [selected]);
+  /** Menu → Delete removes only the right-clicked object (spec §4); the Delete key removes all. */
+  const deleteFromMenu = useCallback(async (id: string) => {
+    setMenu(null);
+    await engineRef.current?.deleteElements([id]);
+  }, []);
 
   const axisLabels = defaultRegistry.axisLabels(crs);
 
@@ -220,24 +256,44 @@ export function App() {
         crs={crs}
         onCrs={setCrs}
         basemap={basemap}
-        onBasemap={setBasemap}
+        onBasemap={(on) => updateView({ basemap: on })}
         onFinish={() => engineRef.current?.finishDrawing()}
         onAbort={() => engineRef.current?.abortDrawing()}
         onZoomToData={() => engineRef.current?.zoomToData()}
       />
 
       <div className="workspace">
-        <div className="map" ref={mapRef} />
-        {menuAt && selected && (
-          <div className="context-menu" style={{ left: menuAt[0], top: menuAt[1] }}>
-            <button onClick={() => setMenuAt(null)}>Properties</button>
-            <button onClick={() => void deleteSelected()}>Delete</button>
+        <div
+          className={`map bg-${view.background}`}
+          ref={mapRef}
+          onPointerDown={(e) => {
+            if (e.button === 0) setMenu(null);
+          }}
+        />
+        {menu?.kind === 'object' && (
+          <div className="context-menu" role="menu" style={{ left: menu.pixel[0], top: menu.pixel[1] }}>
+            <button role="menuitem" onClick={() => void openProperties(menu.elementId)}>
+              Properties
+            </button>
+            <button role="menuitem" onClick={() => void deleteFromMenu(menu.elementId)}>
+              Delete
+            </button>
           </div>
         )}
+        {menu?.kind === 'view' && (
+          <ViewMenu
+            pixel={menu.pixel}
+            view={view}
+            onChange={(patch) => {
+              updateView(patch);
+              setMenu(null);
+            }}
+          />
+        )}
         <PropertiesPanel
-          element={selected}
+          element={properties}
           axisLabels={axisLabels}
-          onClose={() => setSelected(null)}
+          onClose={() => setProperties(null)}
           onSaveMetadata={saveMetadata}
         />
       </div>
@@ -248,8 +304,58 @@ export function App() {
         coordinate={formatCoordinate(cursor, axisLabels)}
         crs={crs}
         elementCount={count}
-        perf={perf}
+        selectedCount={selectedCount}
+        perf={view.showPerf ? perf : null}
       />
+    </div>
+  );
+}
+
+/**
+ * The view menu (spec §4.1): how the application itself is displayed. Each item applies at once
+ * and closes the menu; a check mark shows the current state.
+ */
+function ViewMenu(props: {
+  pixel: [number, number];
+  view: ViewSettings;
+  onChange: (patch: Partial<ViewSettings>) => void;
+}) {
+  const { view, onChange } = props;
+  const mark = (on: boolean) => <span className="menu-check">{on ? '✓' : ''}</span>;
+  return (
+    <div
+      className="context-menu view-menu"
+      role="menu"
+      aria-label="View"
+      style={{ left: props.pixel[0], top: props.pixel[1] }}
+    >
+      <div className="menu-heading">View</div>
+      <button role="menuitemcheckbox" aria-checked={view.basemap} onClick={() => onChange({ basemap: !view.basemap })}>
+        {mark(view.basemap)}Basemap
+      </button>
+      <div className="menu-separator" />
+      <button
+        role="menuitemradio"
+        aria-checked={view.background === 'dark'}
+        onClick={() => onChange({ background: 'dark' })}
+      >
+        {mark(view.background === 'dark')}Background: Dark
+      </button>
+      <button
+        role="menuitemradio"
+        aria-checked={view.background === 'light'}
+        onClick={() => onChange({ background: 'light' })}
+      >
+        {mark(view.background === 'light')}Background: Light
+      </button>
+      <div className="menu-separator" />
+      <button
+        role="menuitemcheckbox"
+        aria-checked={view.showPerf}
+        onClick={() => onChange({ showPerf: !view.showPerf })}
+      >
+        {mark(view.showPerf)}Performance readout
+      </button>
     </div>
   );
 }

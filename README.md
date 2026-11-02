@@ -74,6 +74,24 @@ Standalone tile service with a three-tier cache: Valkey (hot) → filesystem (co
 
 Tiled backdrop layer (`renderMode: 'hybrid'`) carrying the millions of objects, hit-testing filtered to the working set so a click can never select quantized tile geometry, and always-visible performance instrumentation in the status bar.
 
+#### Toolbar actions
+
+Selection behaviour is specified in [knowledge/selection-spec.md](knowledge/selection-spec.md); that spec is the source of truth.
+
+| Tool | Mouse | Keys |
+|---|---|---|
+| **Pan** (hand, default) | Drag moves the map; clicks do nothing | — |
+| **Select** | Click selects one object (replaces the selection); click empty space clears. Drag a rectangle: left→right (dashed) selects objects fully inside, right→left (dotted) selects anything touched. Shift adds, Ctrl removes. Right-click opens the menu (Properties, Delete). | Del deletes all selected, Esc clears |
+| **Point** | Each click places a point | Esc returns to Select |
+| **Polyline** | Click vertices; double-click or right-click finishes | Enter finishes, Backspace undoes a vertex, Esc cancels |
+| **Polygon** | Click at least 3 vertices; click the first vertex or double-click to close | same as Polyline |
+| **Circle** | Click the centre, then a point on the circle | Esc cancels |
+| **Arc (3 pt)** | Click start, a point on the arc, then end; a preview follows the cursor | Backspace undoes a point, Esc cancels |
+
+Right-click on an object opens its menu (Properties, Delete) in every tool; right-click on empty space opens the **View** menu (Basemap, Dark/Light background, Performance readout), remembered per browser. Mid-polyline/polygon, right-click finishes the shape instead. Hovering highlights objects in every tool.
+
+The wheel zooms in every tool. Select is **read-only**: there is no Modify or Translate interaction on the map. The properties panel opens only from right-click → Properties. Only working-set objects (drawn in the app) are selectable; imported backdrop objects become selectable in Phase 4.
+
 ## What Phase 3 delivers so far
 
 ### The job queue lives in PostgreSQL

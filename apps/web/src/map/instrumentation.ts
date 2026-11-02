@@ -23,6 +23,8 @@ export interface PerfSnapshot {
   readonly tileLoadCount: number;
   readonly tileLoadP95Ms: number;
   readonly tileErrorCount: number;
+  /** The most recent tile failure, human-readable, or null. */
+  readonly lastTileError: string | null;
   readonly heapMb: number | null;
   readonly hitTestP95Ms: number;
 }
@@ -43,6 +45,7 @@ export class PerfMonitor {
   readonly #tileTimes: number[] = [];
   readonly #hitTestTimes: number[] = [];
   #tileErrors = 0;
+  #lastTileError: string | null = null;
 
   start(): void {
     if (this.#raf !== null) return;
@@ -78,8 +81,9 @@ export class PerfMonitor {
     push(this.#tileTimes, ms);
   }
 
-  recordTileError(): void {
+  recordTileError(detail?: string): void {
     this.#tileErrors++;
+    if (detail) this.#lastTileError = detail;
   }
 
   /** Wraps a hit test so the 16 ms interaction budget is measured on real user input. */
@@ -101,6 +105,7 @@ export class PerfMonitor {
       tileLoadCount: this.#tileTimes.length,
       tileLoadP95Ms: round(percentile(this.#tileTimes, 0.95)),
       tileErrorCount: this.#tileErrors,
+      lastTileError: this.#lastTileError,
       heapMb: memory ? round(memory.usedJSHeapSize / 1024 / 1024) : null,
       hitTestP95Ms: round(percentile(this.#hitTestTimes, 0.95)),
     };
@@ -110,6 +115,7 @@ export class PerfMonitor {
     this.#tileTimes.length = 0;
     this.#hitTestTimes.length = 0;
     this.#tileErrors = 0;
+    this.#lastTileError = null;
     this.#minFps = Number.POSITIVE_INFINITY;
   }
 }

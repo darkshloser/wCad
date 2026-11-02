@@ -19,6 +19,7 @@ export function StatusBar(props: {
   coordinate: string;
   crs: string;
   elementCount: number;
+  selectedCount?: number;
   perf?: PerfSnapshot | null;
 }) {
   const perf = props.perf;
@@ -38,7 +39,14 @@ export function StatusBar(props: {
               tile p95 {perf.tileLoadP95Ms.toFixed(0)} ms
             </span>
           )}
-          {perf.tileErrorCount > 0 && <span className="perf bad">{perf.tileErrorCount} tile errors</span>}
+          {perf.tileErrorCount > 0 && (
+            <span
+              className="perf bad"
+              title={`Last error: ${perf.lastTileError ?? 'unknown'}\nAll errors are logged in the browser console (F12).`}
+            >
+              {perf.tileErrorCount} tile errors
+            </span>
+          )}
           {perf.heapMb !== null && (
             <span className="perf" title="Budget: under 1.5 GB at 10M objects">
               {perf.heapMb.toFixed(0)} MB
@@ -48,6 +56,7 @@ export function StatusBar(props: {
       )}
       <span className="coordinate">{props.coordinate}</span>
       <span className="crs">{props.crs}</span>
+      {(props.selectedCount ?? 0) > 0 && <span className="selection">{props.selectedCount} selected</span>}
       <span className="count">{props.elementCount} elements</span>
     </footer>
   );

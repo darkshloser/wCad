@@ -9,3 +9,9 @@ fixtures/*.dxf
 !fixtures/precision.dxf
 __pycache__/
 .venv/
+
+# pnpm content-addressable store (pnpm creates it inside the project when the store and project are on different drives/mounts)
+.pnpm-store/
+
+# TypeScript incremental build cache
+*.tsbuildinfo

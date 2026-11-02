@@ -11,7 +11,7 @@ import { createServer, type ServerResponse } from 'node:http';
 import Redis from 'ioredis';
 import { Pool } from 'pg';
 import { PostgresStore } from '@wcad/store-postgis';
-import { type TileScheme, tileKey } from '@wcad/tiling';
+import { type TileScheme, isInPyramid, tileKey } from '@wcad/tiling';
 import { TileCache } from './cache.ts';
 import { ProjectRegistry } from './projects.ts';
 import { FilesystemTier, ValkeyTier } from './tiers.ts';
@@ -107,6 +107,16 @@ const server = createServer(async (req, res) => {
 
     const project = await registry.get(projectId);
     if (!project) return json(res, 404, { error: `Unknown project ${projectId}` });
+
+    // A tile outside the pyramid does not exist; asking for one is a client mistake, not a
+    // server failure. Answer 404 with a reason instead of letting tileBBox throw into a 500 and a
+    // stack trace per request.
+    if (!isInPyramid(project.scheme, tile)) {
+      return json(res, 404, {
+        error: 'Tile outside the pyramid',
+        detail: `${tile.z}/${tile.x}/${tile.y} — zoom ${tile.z} has tiles 0..${2 ** tile.z - 1} in x and y`,
+      });
+    }
 
     // Evict anything the write path marked dirty before serving, so an edit is never served
     // stale. Rebuild stays lazy — this only removes entries.

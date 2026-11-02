@@ -8,13 +8,16 @@
 // later version. See the LICENSE file at the root of this repository.
 
 import { Feature, Map as OlMap, View } from 'ol';
-import { Circle as CircleGeom, LineString, Point, Polygon } from 'ol/geom';
-import { Draw, Modify, Snap } from 'ol/interaction';
+import type { FeatureLike } from 'ol/Feature';
+import type MapBrowserEvent from 'ol/MapBrowserEvent';
+import { Circle as CircleGeom, LineString, MultiPoint, Point, Polygon } from 'ol/geom';
+import { DragPan, Draw, Snap } from 'ol/interaction';
+import PointerInteraction from 'ol/interaction/Pointer';
 import { Vector as VectorLayer } from 'ol/layer';
 import TileLayer from 'ol/layer/Tile';
 import { Vector as VectorSource } from 'ol/source';
 import OSM from 'ol/source/OSM';
-import { Circle as CircleStyle, Fill, Stroke, Style } from 'ol/style';
+import { Circle as CircleStyle, Fill, RegularShape, Stroke, Style } from 'ol/style';
 import { Collection } from 'ol';
 import { get as getProjection } from 'ol/proj';
 import { register } from 'ol/proj/proj4';
@@ -23,6 +26,7 @@ import proj4 from 'proj4';
 import {
   type Arc,
   type Coord3,
+  type ElementKind,
   arcFrom3Points,
   defaultRegistry,
   tessellate,
@@ -31,15 +35,53 @@ import type { Change, ElementRecord, GeometryStore } from '@wcad/store-contract'
 import { type TileScheme, createTileScheme } from '@wcad/tiling';
 import { createBackdropLayer } from './backdrop.ts';
 import { PerfMonitor, type PerfSnapshot } from './instrumentation.ts';
+import {
+  type Extent,
+  type RectMode,
+  type SelectionModifier,
+  applySelection,
+  clickSelection,
+  extentContains,
+  isDrag,
+  modifierFrom,
+  normalizeRect,
+  rectMode,
+  rightClickDecision,
+  sameSelection,
+} from './selection.ts';
+import {
+  type ToolName,
+  DEFAULT_TOOL,
+  TOOL_GUIDE,
+  dedupeConsecutive,
+  drawnShapeProblem,
+  isDrawingTool,
+  keyAction,
+  selectionVertices,
+} from './toolRules.ts';
 
-export type ToolName = 'select' | 'point' | 'line' | 'polygon' | 'circle' | 'arc3';
+export type { ToolName } from './toolRules.ts';
 
 export interface EngineEvents {
   onPointerMove(coord: Coord3): void;
-  onContextMenu(payload: { elementId: string; pixel: [number, number] } | null): void;
+  /**
+   * A menu should open (spec §4, §4.1): the object menu for a right-clicked object, or the view menu
+   * for empty space. Null asks the shell to close any open menu.
+   */
+  onContextMenu(payload: ContextMenuRequest | null): void;
+  /** The set of selected objects changed. */
+  onSelectionChanged(elementIds: readonly string[]): void;
+  /** Objects were deleted, so any panel showing them should close. */
+  onElementsDeleted(elementIds: readonly string[]): void;
+  /** The engine asks the shell to switch tool, e.g. Esc with nothing in progress returns to Select. */
+  onRequestTool(tool: ToolName): void;
   onElementsChanged(): void;
   onStatus(message: string): void;
 }
+
+export type ContextMenuRequest =
+  | { readonly kind: 'object'; readonly elementId: string; readonly pixel: [number, number] }
+  | { readonly kind: 'view'; readonly pixel: [number, number] };
 
 /**
  * Backdrop configuration (Phase 2). When absent the map runs working-set only, which is what
@@ -50,19 +92,70 @@ export interface BackdropConfig {
   readonly projectExtent: readonly [number, number, number, number];
 }
 
+// ------------------------------------------------------------------------------------ styles
+
 const WORKING_STYLE = new Style({
   stroke: new Stroke({ color: '#2b6cb0', width: 2 }),
   fill: new Fill({ color: 'rgba(43, 108, 176, 0.12)' }),
   image: new CircleStyle({ radius: 4, fill: new Fill({ color: '#2b6cb0' }) }),
 });
 
-const SNAP_STYLE = new Style({
+const HOVER_STYLE = new Style({
+  stroke: new Stroke({ color: '#3b82f6', width: 3 }),
+  fill: new Fill({ color: 'rgba(59, 130, 246, 0.20)' }),
+  image: new CircleStyle({ radius: 5, fill: new Fill({ color: '#3b82f6' }) }),
+});
+
+const SELECT_COLOR = '#e8590c';
+
+// Two passes: a wide white halo underneath, then the coloured stroke. The halo keeps the
+// selection readable over the backdrop and the basemap, whatever colour is beneath it.
+const SELECTED_HALO = new Style({
+  stroke: new Stroke({ color: 'rgba(255, 255, 255, 0.95)', width: 7 }),
+  image: new CircleStyle({ radius: 9, fill: new Fill({ color: 'rgba(255, 255, 255, 0.95)' }) }),
+  zIndex: 1,
+});
+
+const SELECTED_MAIN = new Style({
+  stroke: new Stroke({ color: SELECT_COLOR, width: 3 }),
+  fill: new Fill({ color: 'rgba(232, 89, 12, 0.18)' }),
   image: new CircleStyle({
-    radius: 5,
+    radius: 6,
+    fill: new Fill({ color: SELECT_COLOR }),
+    stroke: new Stroke({ color: '#ffffff', width: 1.5 }),
+  }),
+  zIndex: 2,
+});
+
+// Vertex markers show WHERE the vertices are. They are not grips: Select is read-only, and there
+// is no interaction on the map that could drag them.
+const VERTEX_MARK = new RegularShape({
+  points: 4,
+  radius: 5,
+  angle: Math.PI / 4,
+  fill: new Fill({ color: '#ffffff' }),
+  stroke: new Stroke({ color: SELECT_COLOR, width: 1.5 }),
+});
+
+const SKETCH_STYLE = new Style({
+  stroke: new Stroke({ color: '#d69e2e', width: 2, lineDash: [6, 4] }),
+  image: new CircleStyle({
+    radius: 4,
+    fill: new Fill({ color: '#ffffff' }),
     stroke: new Stroke({ color: '#d69e2e', width: 2 }),
-    fill: new Fill({ color: 'rgba(214, 158, 46, 0.35)' }),
   }),
 });
+
+const WORKING_Z = 10;
+
+/** State of a left-button gesture in Select mode, from press to release. */
+interface SelectGesture {
+  readonly startPixel: [number, number];
+  readonly modifier: SelectionModifier;
+  dragging: boolean;
+  cancelled: boolean;
+  lastPixel: [number, number];
+}
 
 /**
  * Imperative OpenLayers wrapper.
@@ -73,20 +166,30 @@ const SNAP_STYLE = new Style({
  *
  * Two layers, deliberately separate (principle P1):
  *   backdrop    — MVT tiles, quantized, generalized, read-only. Holds the millions of objects.
- *   working set — authoritative float64 features. The only thing Draw, Modify and Snap touch.
+ *   working set — authoritative float64 features. The only thing Draw, Snap and Select touch.
  *
- * Hit-testing is filtered to the working set so a click can never select tile geometry.
+ * Selection behaviour is specified in knowledge/selection-spec.md; the rules themselves live in
+ * selection.ts and this class only feeds them events. Select is read-only: there is no Modify or
+ * Translate interaction anywhere, so nothing on the map can move a vertex.
  */
 export class CadEngine {
   #map: OlMap;
   #workingSource = new VectorSource<Feature>();
-  #snapSource = new VectorSource<Feature>();
+  #workingLayer: VectorLayer<VectorSource<Feature>>;
+  #sketchSource = new VectorSource<Feature>();
   #snapCollection = new Collection<Feature>();
   #draw: Draw | null = null;
-  #modify: Modify;
+  #sketching = false;
   #snap: Snap;
+  #dragPan: DragPan | undefined;
+  #selectInteraction: PointerInteraction;
+  #gesture: SelectGesture | null = null;
+  #rectEl: HTMLDivElement;
   #arcClicks: Coord3[] = [];
-  #tool: ToolName = 'select';
+  #tool: ToolName = DEFAULT_TOOL;
+  #selectedIds: Set<string> = new Set();
+  #hoverId: string | null = null;
+  #menuTargetId: string | null = null;
   #basemap: TileLayer<OSM>;
   #perf = new PerfMonitor();
   #scheme: TileScheme | null = null;
@@ -115,8 +218,10 @@ export class CadEngine {
 
     this.#basemap = new TileLayer({ source: new OSM(), visible: false, opacity: 0.6 });
 
-    const workingLayer = new VectorLayer({ source: this.#workingSource, style: WORKING_STYLE });
-    const snapLayer = new VectorLayer({ source: this.#snapSource, style: SNAP_STYLE });
+    // Style is a function of the selection, not baked into features: the working set is rebuilt
+    // from the store on every pan, and a highlight stored on a feature would vanish with it.
+    this.#workingLayer = new VectorLayer({ source: this.#workingSource, style: this.#styleFor });
+    const sketchLayer = new VectorLayer({ source: this.#sketchSource, style: SKETCH_STYLE });
 
     const projection = getProjection(this.#crsCode) ?? undefined;
     const def = defaultRegistry.get(this.#crsCode);
@@ -125,8 +230,6 @@ export class CadEngine {
       (def.extent[1] + def.extent[3]) / 2,
     ];
 
-    // The backdrop carries the millions of objects and is read-only by construction; the
-    // working set carries the handful the user can actually touch (principle P1).
     const layers: Array<TileLayer<OSM> | VectorLayer<VectorSource<Feature>> | ReturnType<typeof createBackdropLayer>> =
       [this.#basemap];
 
@@ -140,14 +243,19 @@ export class CadEngine {
           projectId: this.#projectId,
           tileServiceUrl: backdrop.tileServiceUrl,
           onTileLoad: (ms) => this.#perf.recordTileLoad(ms),
-          onTileError: () => this.#perf.recordTileError(),
+          onTileError: (e) => {
+            // Every failure is logged in full, so "N tile errors" is never a dead end.
+            console.warn(`[wcad] tile failed: HTTP ${e.status || 'no response'} ${e.url} — ${e.message}`);
+            const tile = /\/(\d+\/\d+\/\d+)\.mvt/.exec(e.url)?.[1] ?? e.url;
+            this.#perf.recordTileError(`${e.status || 'no response'} on tile ${tile}: ${e.message}`);
+          },
         }),
       );
     }
 
-    workingLayer.setZIndex(10);
-    snapLayer.setZIndex(20);
-    layers.push(workingLayer, snapLayer);
+    this.#workingLayer.setZIndex(WORKING_Z);
+    sketchLayer.setZIndex(25);
+    layers.push(this.#workingLayer, sketchLayer);
 
     this.#map = new OlMap({
       target,
@@ -158,40 +266,40 @@ export class CadEngine {
 
     this.#perf.start();
 
-    this.#modify = new Modify({ source: this.#workingSource });
+    // Left-drag pans in Pan and the drawing tools, and draws the selection rectangle in Select.
+    this.#dragPan = this.#map
+      .getInteractions()
+      .getArray()
+      .find((i): i is DragPan => i instanceof DragPan);
+
+    // Snap candidates are deliberately NOT drawn. Rendering every nearby vertex as a marker looked
+    // exactly like a selection the user never made (spec §6). Draw's own cursor already shows the
+    // single snapped position while drawing.
     this.#snap = new Snap({ features: this.#snapCollection });
-    this.#map.addInteraction(this.#modify);
     this.#map.addInteraction(this.#snap);
 
-    this.#map.on('pointermove', (evt) => {
-      const c = evt.coordinate;
-      this.#events.onPointerMove([c[0]!, c[1]!, 0]);
-      void this.#refreshSnapCandidates();
+    this.#selectInteraction = new PointerInteraction({
+      handleDownEvent: this.#onSelectDown,
+      handleDragEvent: this.#onSelectDrag,
+      handleUpEvent: this.#onSelectUp,
     });
+    this.#map.addInteraction(this.#selectInteraction);
 
+    this.#rectEl = document.createElement('div');
+    this.#rectEl.className = 'select-rect';
+    this.#rectEl.hidden = true;
+    this.#map.getViewport().appendChild(this.#rectEl);
+
+    this.#map.on('pointermove', this.#onPointerMove);
+    this.#map.on('click', this.#onClick);
     this.#map.on('moveend', () => void this.#reloadViewport());
+    const viewport = this.#map.getViewport();
+    viewport.addEventListener('contextmenu', this.#onContextMenu);
+    viewport.addEventListener('pointerdown', this.#onViewportDown);
+    window.addEventListener('pointerup', this.#onViewportUp);
+    document.addEventListener('keydown', this.#onKeyDown);
 
-    this.#map.getViewport().addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      const browserEvent = e as MouseEvent;
-      const pixel = this.#map.getEventPixel(browserEvent);
-      // Measured: the interaction budget is 16 ms with zero network, at any drawing size.
-      const hit = this.#perf.measureHitTest(() =>
-        this.#map.forEachFeatureAtPixel(pixel, (f) => f as Feature, {
-          hitTolerance: 6,
-          // Never hit-test the backdrop: its coordinates are quantized, so a "selection" made
-          // from it would be subtly wrong and unfixable downstream.
-          layerFilter: (layer) => layer.getZIndex() === 10,
-        }),
-      );
-      const id = hit?.get('elementId') as string | undefined;
-      this.#events.onContextMenu(id ? { elementId: id, pixel: [browserEvent.clientX, browserEvent.clientY] } : null);
-    });
-
-    this.#modify.on('modifyend', (evt) => {
-      void this.#persistModified(evt.features.getArray() as Feature[]);
-    });
-
+    this.setTool(DEFAULT_TOOL);
     void this.#reloadViewport();
   }
 
@@ -208,42 +316,111 @@ export class CadEngine {
     return this.#scheme;
   }
 
+  get selectedIds(): readonly string[] {
+    return [...this.#selectedIds];
+  }
+
   setBasemapVisible(visible: boolean): void {
     this.#basemap.setVisible(visible);
   }
 
   setTool(tool: ToolName): void {
     this.#tool = tool;
-    this.#arcClicks = [];
+    this.#resetArc();
+    this.#cancelGesture();
+    this.#setHover(null);
     if (this.#draw) {
       this.#map.removeInteraction(this.#draw);
       this.#draw = null;
     }
-    this.#map.un('click', this.#onArcClick);
+    this.#sketching = false;
 
-    if (tool === 'select') {
-      this.#events.onStatus('Select mode. Right-click an element for properties.');
-      return;
-    }
-    if (tool === 'arc3') {
-      this.#map.on('click', this.#onArcClick);
-      this.#events.onStatus('Arc: click start, a point on the arc, then end.');
-      return;
-    }
+    const drawing = isDrawingTool(tool);
+    // Spec §6: switching to a drawing tool clears the selection. Switching to Pan keeps it.
+    if (drawing) this.clearSelection();
 
-    const type = { point: 'Point', line: 'LineString', polygon: 'Polygon', circle: 'Circle' }[tool] as
-      | 'Point'
-      | 'LineString'
-      | 'Polygon'
-      | 'Circle';
+    this.#dragPan?.setActive(tool !== 'select');
+    this.#selectInteraction.setActive(tool === 'select');
+    this.#snap.setActive(drawing);
+    if (!drawing) this.#snapCollection.clear();
 
-    this.#draw = new Draw({ source: this.#workingSource, type });
-    this.#draw.on('drawend', (evt) => void this.#persistDrawn(evt.feature as Feature));
+    this.#setCursor(tool === 'pan' ? 'grab' : tool === 'select' ? 'default' : 'crosshair');
+    this.#events.onStatus(TOOL_GUIDE[tool]);
+
+    if (!drawing || tool === 'arc3') return;
+
+    const type = { point: 'Point', line: 'LineString', polygon: 'Polygon', circle: 'Circle' }[
+      tool as 'point' | 'line' | 'polygon' | 'circle'
+    ] as 'Point' | 'LineString' | 'Polygon' | 'Circle';
+
+    this.#draw = new Draw({
+      source: this.#workingSource,
+      type,
+      stopClick: true,
+      ...(tool === 'line' ? { minPoints: 2 } : {}),
+      ...(tool === 'polygon' ? { minPoints: 3 } : {}),
+    });
+    this.#draw.on('drawstart', () => {
+      this.#sketching = true;
+    });
+    this.#draw.on('drawabort', () => {
+      this.#sketching = false;
+    });
+    this.#draw.on('drawend', (evt) => {
+      this.#sketching = false;
+      void this.#persistDrawn(evt.feature as Feature);
+    });
     this.#map.addInteraction(this.#draw);
     // Snap must be added after Draw so it processes pointer events first.
     this.#map.removeInteraction(this.#snap);
     this.#map.addInteraction(this.#snap);
-    this.#events.onStatus(`${tool} tool active. Snapping to existing vertices is on.`);
+  }
+
+  /**
+   * Marks the object an open menu acts on with the hover highlight (spec §4), so it stays clear
+   * which object the menu belongs to after the pointer moves onto the menu. Null when it closes.
+   */
+  setMenuTarget(id: string | null): void {
+    if (id === this.#menuTargetId) return;
+    this.#menuTargetId = id;
+    this.#workingLayer.changed();
+  }
+
+  /** Clears the selection and its highlight. */
+  clearSelection(): void {
+    this.#setSelection(new Set());
+  }
+
+  /** Reloads the working set from the store, e.g. after a change made outside the map. */
+  refresh(): Promise<void> {
+    return this.#reloadViewport();
+  }
+
+  /**
+   * Deletes objects by id, using the store's current versions so a concurrent edit is reported as
+   * a conflict rather than silently overwritten. Deleted ids leave the selection.
+   */
+  async deleteElements(ids: readonly string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    const records = await this.#store.getExact([...ids]);
+    if (records.length === 0) return 0;
+    const res = await this.#store.commit(
+      this.#projectId,
+      records.map((r): Change => ({ op: 'delete', id: r.id, baseVersion: r.version })),
+    );
+    if (!res.ok) {
+      this.#events.onStatus('Delete rejected: an object changed elsewhere. Reloaded.');
+      await this.#reloadViewport();
+      return 0;
+    }
+    const deleted = records.map((r) => r.id);
+    const remaining = new Set(this.#selectedIds);
+    for (const id of deleted) remaining.delete(id);
+    this.#setSelection(remaining);
+    await this.#reloadViewport();
+    this.#events.onElementsDeleted(deleted);
+    this.#events.onStatus(`${deleted.length} object${deleted.length === 1 ? '' : 's'} deleted.`);
+    return deleted.length;
   }
 
   /** Adds a point from the typed command line, so typed and mouse entry share one path. */
@@ -261,37 +438,297 @@ export class CadEngine {
   }
 
   finishDrawing(): void {
-    this.#draw?.finishDrawing();
+    if (this.#tool === 'line' || this.#tool === 'polygon') this.#draw?.finishDrawing();
   }
 
   abortDrawing(): void {
     this.#draw?.abortDrawing();
-    this.#arcClicks = [];
+    this.#sketching = false;
+    this.#resetArc();
   }
 
   zoomToData(): void {
     const extent = this.#workingSource.getExtent();
-    if (extent.every(Number.isFinite) && extent[0] !== Infinity) {
+    if (extent && extent.every(Number.isFinite)) {
       this.#map.getView().fit(extent, { padding: [60, 60, 60, 60], maxZoom: 20 });
     }
   }
 
   dispose(): void {
     this.#perf.stop();
+    document.removeEventListener('keydown', this.#onKeyDown);
+    window.removeEventListener('pointerup', this.#onViewportUp);
+    const viewport = this.#map.getViewport();
+    viewport.removeEventListener('contextmenu', this.#onContextMenu);
+    viewport.removeEventListener('pointerdown', this.#onViewportDown);
     this.#map.setTarget(undefined);
   }
 
-  #onArcClick = (evt: { coordinate: number[] }): void => {
-    this.#onArcPoint([evt.coordinate[0]!, evt.coordinate[1]!, 0]);
+  // ---------------------------------------------------------------------------- selection state
+
+  #styleFor = (feature: FeatureLike): Style | Style[] => {
+    const id = feature.get('elementId') as string | undefined;
+    if (id !== undefined && this.#selectedIds.has(id)) return selectedStyle(feature);
+    if (id !== undefined && (id === this.#hoverId || id === this.#menuTargetId)) return HOVER_STYLE;
+    return WORKING_STYLE;
   };
+
+  /** The only place the selection changes. Every caller is a deliberate user gesture. */
+  #setSelection(next: Set<string>): void {
+    if (sameSelection(next, this.#selectedIds)) return;
+    this.#selectedIds = next;
+    this.#workingLayer.changed();
+    this.#events.onSelectionChanged([...next]);
+    if (this.#tool === 'select') this.#events.onStatus(this.#selectionStatus());
+  }
+
+  #selectionStatus(): string {
+    const n = this.#selectedIds.size;
+    if (n === 0) return TOOL_GUIDE.select;
+    if (n === 1) {
+      const [id] = this.#selectedIds;
+      const kind = this.#workingSource.getFeatures().find((f) => f.get('elementId') === id)?.get('kind') as
+        | ElementKind
+        | undefined;
+      return `${describeKind(kind)} selected (read-only). Esc to clear.`;
+    }
+    return `${n} objects selected (read-only). Esc to clear.`;
+  }
+
+  #setHover(id: string | null): void {
+    if (id === this.#hoverId) return;
+    this.#hoverId = id;
+    this.#workingLayer.changed();
+    if (this.#tool === 'select') this.#setCursor(id ? 'pointer' : 'default');
+  }
+
+  /**
+   * The working-set feature id under a pixel, or null.
+   *
+   * Never hit-tests the backdrop: its coordinates are quantized, so a "selection" made from it
+   * would be subtly wrong and unfixable downstream. Measured, because hover-to-highlight has a
+   * 16 ms budget at any drawing size.
+   */
+  #hitAt(pixel: number[]): string | null {
+    return (
+      this.#perf.measureHitTest(() =>
+        this.#map.forEachFeatureAtPixel(pixel, (f) => (f.get('elementId') as string | undefined) || undefined, {
+          hitTolerance: 6,
+          layerFilter: (layer) => layer === this.#workingLayer,
+        }),
+      ) ?? null
+    );
+  }
+
+  /** Ids of working-set objects selected by a rectangle in map coordinates (spec §3.2). */
+  #idsInRect(rect: Extent, mode: RectMode): string[] {
+    const ids: string[] = [];
+    const extent: [number, number, number, number] = [rect[0], rect[1], rect[2], rect[3]];
+    if (mode === 'window') {
+      // Fully inside: the object's whole extent lies within the rectangle.
+      for (const f of this.#workingSource.getFeaturesInExtent(extent)) {
+        const geom = f.getGeometry();
+        const id = f.get('elementId') as string | undefined;
+        if (geom && id && extentContains(rect, geom.getExtent() as unknown as Extent)) ids.push(id);
+      }
+    } else {
+      // Touching: exact geometry-against-rectangle intersection, not just overlapping extents —
+      // otherwise a long diagonal line would be "touched" by a box nowhere near it.
+      this.#workingSource.forEachFeatureIntersectingExtent(extent, (f) => {
+        const id = f.get('elementId') as string | undefined;
+        if (id) ids.push(id);
+      });
+    }
+    return ids;
+  }
+
+  // ---------------------------------------------------------------------------- select gestures
+
+  #onSelectDown = (evt: MapBrowserEvent): boolean => {
+    const e = evt.originalEvent as PointerEvent;
+    if (e.button !== 0) return false;
+    this.#gesture = {
+      startPixel: [evt.pixel[0]!, evt.pixel[1]!],
+      lastPixel: [evt.pixel[0]!, evt.pixel[1]!],
+      modifier: modifierFrom(e),
+      dragging: false,
+      cancelled: false,
+    };
+    return true;
+  };
+
+  #onSelectDrag = (evt: MapBrowserEvent): void => {
+    const g = this.#gesture;
+    if (!g || g.cancelled) return;
+    g.lastPixel = [evt.pixel[0]!, evt.pixel[1]!];
+    if (!g.dragging && isDrag(g.startPixel, g.lastPixel)) {
+      g.dragging = true;
+      this.#setHover(null);
+    }
+    if (g.dragging) this.#drawRect(g.startPixel, g.lastPixel);
+  };
+
+  #onSelectUp = (evt: MapBrowserEvent): boolean => {
+    const g = this.#gesture;
+    this.#gesture = null;
+    this.#hideRect();
+    if (!g || g.cancelled) return false;
+
+    const end: [number, number] = [evt.pixel[0]!, evt.pixel[1]!];
+    if (!g.dragging) {
+      this.#setSelection(clickSelection(this.#selectedIds, this.#hitAt(g.startPixel), g.modifier));
+      return false;
+    }
+
+    const a = this.#map.getCoordinateFromPixel(g.startPixel);
+    const b = this.#map.getCoordinateFromPixel(end);
+    if (!a || !b) return false;
+    const rect = normalizeRect([a[0]!, a[1]!], [b[0]!, b[1]!]);
+    const ids = this.#idsInRect(rect, rectMode(g.startPixel[0], end[0]));
+    this.#setSelection(applySelection(this.#selectedIds, ids, g.modifier));
+    return false;
+  };
+
+  #cancelGesture(): void {
+    if (this.#gesture) this.#gesture.cancelled = true;
+    this.#hideRect();
+  }
+
+  #drawRect(start: [number, number], end: [number, number]): void {
+    const el = this.#rectEl;
+    el.hidden = false;
+    el.className = `select-rect ${rectMode(start[0], end[0])}`;
+    el.style.left = `${Math.min(start[0], end[0])}px`;
+    el.style.top = `${Math.min(start[1], end[1])}px`;
+    el.style.width = `${Math.abs(end[0] - start[0])}px`;
+    el.style.height = `${Math.abs(end[1] - start[1])}px`;
+  }
+
+  #hideRect(): void {
+    this.#rectEl.hidden = true;
+  }
+
+  // ---------------------------------------------------------------------------- other input
+
+  #onPointerMove = (evt: MapBrowserEvent): void => {
+    const c = evt.coordinate;
+    this.#events.onPointerMove([c[0]!, c[1]!, 0]);
+
+    // Hover highlights in every tool, so the user sees what a right-click will act on (spec §3.3).
+    if (!evt.dragging && !this.#gesture) this.#setHover(this.#hitAt(evt.pixel));
+    if (!isDrawingTool(this.#tool)) return;
+    if (this.#tool === 'arc3') this.#renderArcSketch([c[0]!, c[1]!, 0]);
+    void this.#refreshSnapCandidates();
+  };
+
+  /** Map clicks matter only to the arc tool; Select uses its own gesture, Pan ignores clicks. */
+  #onClick = (evt: MapBrowserEvent): void => {
+    if (this.#tool === 'arc3') this.#onArcPoint([evt.coordinate[0]!, evt.coordinate[1]!, 0]);
+  };
+
+  #onViewportDown = (e: PointerEvent): void => {
+    if (this.#tool === 'pan' && e.button === 0) this.#setCursor('grabbing');
+  };
+
+  #onViewportUp = (): void => {
+    if (this.#tool === 'pan') this.#setCursor('grab');
+  };
+
+  #onContextMenu = (e: MouseEvent): void => {
+    e.preventDefault();
+    const pixel: [number, number] = [e.clientX, e.clientY];
+    const decision = rightClickDecision(
+      { tool: this.#tool, sketching: this.#sketching },
+      this.#hitAt(this.#map.getEventPixel(e)),
+      this.#selectedIds,
+    );
+
+    switch (decision.kind) {
+      case 'finish-shape':
+        this.finishDrawing();
+        return;
+      case 'object-menu':
+        this.#setSelection(decision.selection);
+        this.setMenuTarget(decision.elementId);
+        this.#events.onContextMenu({ kind: 'object', elementId: decision.elementId, pixel });
+        return;
+      case 'view-menu':
+        this.setMenuTarget(null);
+        this.#events.onContextMenu({ kind: 'view', pixel });
+        return;
+    }
+  };
+
+  #onKeyDown = (e: KeyboardEvent): void => {
+    const action = keyAction(e.key, (e.target as HTMLElement | null)?.tagName);
+    if (!action) return;
+
+    if (action === 'cancel') {
+      this.#events.onContextMenu(null);
+      if (this.#tool === 'select') {
+        // Esc during a rectangle drag cancels only the drag; otherwise it deselects everything.
+        if (this.#gesture?.dragging && !this.#gesture.cancelled) this.#cancelGesture();
+        else this.clearSelection();
+      } else if (this.#sketching || this.#arcClicks.length > 0) {
+        this.abortDrawing();
+        this.#events.onStatus(`Cancelled. ${TOOL_GUIDE[this.#tool]}`);
+      } else if (isDrawingTool(this.#tool)) {
+        // Nothing in progress: a second Esc leaves the drawing tool, as in most CAD programs.
+        this.#events.onRequestTool('select');
+      }
+      return;
+    }
+
+    if (action === 'delete') {
+      if (this.#tool === 'select' && this.#selectedIds.size > 0) {
+        e.preventDefault();
+        this.#events.onContextMenu(null);
+        void this.deleteElements([...this.#selectedIds]);
+      }
+      return;
+    }
+
+    if (action === 'finish') {
+      if (this.#sketching) {
+        e.preventDefault();
+        this.finishDrawing();
+      }
+      return;
+    }
+
+    if (action === 'undo-vertex') {
+      if (this.#tool === 'arc3' && this.#arcClicks.length > 0) {
+        e.preventDefault();
+        this.#arcClicks.pop();
+        this.#renderArcSketch();
+        this.#events.onStatus(`Arc point removed; ${this.#arcClicks.length} of 3 captured.`);
+      } else if (this.#sketching && (this.#tool === 'line' || this.#tool === 'polygon')) {
+        e.preventDefault();
+        this.#draw?.removeLastPoint();
+      }
+    }
+  };
+
+  #setCursor(cursor: string): void {
+    this.#map.getViewport().style.cursor = cursor;
+  }
+
+  // ---------------------------------------------------------------------------- arc
+
+  #resetArc(): void {
+    this.#arcClicks = [];
+    this.#sketchSource.clear();
+  }
 
   #onArcPoint(p: Coord3): void {
     this.#arcClicks.push(p);
-    this.#events.onStatus(`Arc point ${this.#arcClicks.length} of 3 captured.`);
+    this.#renderArcSketch();
+    const next = ['', 'Now click a point on the arc.', 'Now click the end point.'][this.#arcClicks.length] ?? '';
+    this.#events.onStatus(`Arc point ${this.#arcClicks.length} of 3 captured. ${next}`);
     if (this.#arcClicks.length < 3) return;
 
     const [a, b, c] = this.#arcClicks as [Coord3, Coord3, Coord3];
-    this.#arcClicks = [];
+    this.#resetArc();
     let arc: Arc;
     try {
       arc = arcFrom3Points([a[0], a[1]], [b[0], b[1]], [c[0], c[1]]);
@@ -301,6 +738,35 @@ export class CadEngine {
     }
     void this.#persistArc(arc);
   }
+
+  /**
+   * Rubber-band preview while placing an arc: the clicked points, then a line to the cursor, then
+   * the arc itself once two points are known. Without it the arc tool gives no feedback at all
+   * until the third click.
+   */
+  #renderArcSketch(cursor?: Coord3): void {
+    this.#sketchSource.clear();
+    for (const p of this.#arcClicks) this.#sketchSource.addFeature(new Feature(new Point([p[0], p[1]])));
+    if (!cursor || this.#arcClicks.length === 0) return;
+
+    const [a, b] = this.#arcClicks;
+    if (this.#arcClicks.length === 1) {
+      this.#sketchSource.addFeature(new Feature(new LineString([[a![0], a![1]], [cursor[0], cursor[1]]])));
+      return;
+    }
+    try {
+      const arc = arcFrom3Points([a![0], a![1]], [b![0], b![1]], [cursor[0], cursor[1]]);
+      const pts = tessellate(arc, this.#displayTolerance());
+      this.#sketchSource.addFeature(new Feature(new LineString(pts.map((p) => [p[0], p[1]]))));
+    } catch {
+      // Collinear or coincident so far: no arc exists yet, so show the straight path instead.
+      this.#sketchSource.addFeature(
+        new Feature(new LineString([[a![0], a![1]], [b![0], b![1]], [cursor[0], cursor[1]]])),
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------------- persistence
 
   /**
    * Arcs are stored as their canonical parametric definition and tessellated only for display
@@ -337,38 +803,45 @@ export class CadEngine {
       return;
     }
     await this.#reloadViewport();
-    this.#events.onStatus(`Arc created (r = ${arc.radius.toFixed(3)}).`);
+    this.#events.onStatus(`Arc created (r = ${arc.radius.toFixed(3)}). ${TOOL_GUIDE.arc3}`);
   }
 
   async #persistDrawn(feature: Feature): Promise<void> {
     const geom = feature.getGeometry();
-    if (!geom) return;
     // The drawn feature is replaced by the reloaded, store-backed one so that the id and
     // version always come from the store rather than being invented on the client.
     this.#workingSource.removeFeature(feature);
+    if (!geom) return;
 
     let coords: number[][];
-    let kind: ElementRecord['kind'];
+    let kind: ElementKind;
     let params: Record<string, number> | undefined;
+    let radius: number | undefined;
 
     if (geom instanceof Point) {
       const c = geom.getCoordinates();
       coords = [[c[0]!, c[1]!, 0]];
       kind = 'point';
     } else if (geom instanceof LineString) {
-      coords = geom.getCoordinates().map((c) => [c[0]!, c[1]!, 0]);
+      coords = dedupeConsecutive(geom.getCoordinates()).map((c) => [c[0]!, c[1]!, 0]);
       kind = 'polyline';
     } else if (geom instanceof Polygon) {
-      coords = geom.getCoordinates()[0]!.map((c) => [c[0]!, c[1]!, 0]);
+      coords = dedupeConsecutive(geom.getCoordinates()[0]!).map((c) => [c[0]!, c[1]!, 0]);
       kind = 'polygon';
     } else if (geom instanceof CircleGeom) {
       const c = geom.getCenter();
-      const r = geom.getRadius();
-      coords = [[c[0]! + r, c[1]!, 0]];
+      radius = geom.getRadius();
+      coords = [[c[0]! + radius, c[1]!, 0]];
       kind = 'circle';
-      params = { cx: c[0]!, cy: c[1]!, r };
+      params = { cx: c[0]!, cy: c[1]!, r: radius };
     } else {
       this.#events.onStatus('Unsupported geometry type.');
+      return;
+    }
+
+    const problem = drawnShapeProblem(kind, coords, radius);
+    if (problem) {
+      this.#events.onStatus(`Not created: ${problem}`);
       return;
     }
 
@@ -390,31 +863,7 @@ export class CadEngine {
       return;
     }
     await this.#reloadViewport();
-    this.#events.onStatus(`${kind} created.`);
-  }
-
-  async #persistModified(features: Feature[]): Promise<void> {
-    const changes: Change[] = [];
-    for (const f of features) {
-      const id = f.get('elementId') as string | undefined;
-      const version = f.get('version') as number | undefined;
-      const geom = f.getGeometry();
-      if (!id || version === undefined || !geom) continue;
-      let coords: number[][] | null = null;
-      if (geom instanceof LineString) coords = geom.getCoordinates().map((c) => [c[0]!, c[1]!, 0]);
-      else if (geom instanceof Polygon) coords = geom.getCoordinates()[0]!.map((c) => [c[0]!, c[1]!, 0]);
-      else if (geom instanceof Point) coords = [[geom.getCoordinates()[0]!, geom.getCoordinates()[1]!, 0]];
-      if (!coords) continue;
-      changes.push({ op: 'update', id, baseVersion: version, element: { coords } });
-    }
-    if (changes.length === 0) return;
-    const res = await this.#store.commit(this.#projectId, changes);
-    if (!res.ok) {
-      this.#events.onStatus(
-        `Edit rejected: element changed elsewhere (expected v${res.conflicts[0]?.expectedVersion}, found v${res.conflicts[0]?.actualVersion}). Reloading.`,
-      );
-    }
-    await this.#reloadViewport();
+    this.#events.onStatus(`${describeKind(kind)} created. ${TOOL_GUIDE[this.#tool]}`);
   }
 
   /** Tessellation tolerance derived from the current pixel size, so detail follows zoom. */
@@ -423,6 +872,10 @@ export class CadEngine {
     return Math.max(res * 0.5, 1e-6);
   }
 
+  /**
+   * Rebuilds the working set for the current view. It never touches the selection: selection is
+   * held by id, so objects keep their highlight across pans and zooms (spec §6).
+   */
   async #reloadViewport(): Promise<void> {
     const extent = this.#map.getView().calculateExtent(this.#map.getSize() ?? [800, 600]);
     const records = await this.#store.queryBBox(this.#projectId, [
@@ -443,6 +896,7 @@ export class CadEngine {
   /**
    * Snap candidates come from the store, bounded and proximity-ordered, and are held in a small
    * collection rather than pointing Snap at the whole drawing (architecture doc section 6.2).
+   * They feed the Snap interaction only and are never rendered.
    */
   async #refreshSnapCandidates(): Promise<void> {
     const view = this.#map.getView();
@@ -457,14 +911,48 @@ export class CadEngine {
       centerCoord[1]! + margin,
     ];
     const candidates = await this.#store.snapCandidates(this.#projectId, bbox, 500);
-    this.#snapSource.clear();
+    if (!isDrawingTool(this.#tool)) return;
     this.#snapCollection.clear();
     for (const c of candidates) {
       const f = new Feature(new Point([c.x, c.y]));
       f.set('role', c.role);
-      this.#snapSource.addFeature(f);
       this.#snapCollection.push(f);
     }
+  }
+}
+
+/** Highlight for a selected object: halo, coloured outline, and markers on its real vertices. */
+function selectedStyle(feature: FeatureLike): Style[] {
+  const geom = feature.getGeometry();
+  let drawn: number[][] = [];
+  let center: [number, number] | undefined;
+  if (geom instanceof LineString) drawn = geom.getCoordinates();
+  else if (geom instanceof Polygon) drawn = geom.getCoordinates()[0] ?? [];
+  else if (geom instanceof CircleGeom) {
+    const c = geom.getCenter();
+    center = [c[0]!, c[1]!];
+  }
+
+  const vertices = selectionVertices(feature.get('kind') as ElementKind, drawn, center);
+  if (vertices.length === 0) return [SELECTED_HALO, SELECTED_MAIN];
+  return [SELECTED_HALO, SELECTED_MAIN, new Style({ geometry: new MultiPoint(vertices), image: VERTEX_MARK, zIndex: 3 })];
+}
+
+function describeKind(kind: ElementKind | undefined): string {
+  switch (kind) {
+    case 'point':
+      return 'Point';
+    case 'line':
+    case 'polyline':
+      return 'Polyline';
+    case 'polygon':
+      return 'Polygon';
+    case 'circle':
+      return 'Circle';
+    case 'arc':
+      return 'Arc';
+    default:
+      return 'Object';
   }
 }
 

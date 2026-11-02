@@ -10,11 +10,12 @@
 import VectorTileLayer from 'ol/layer/VectorTile';
 import VectorTileSource from 'ol/source/VectorTile';
 import MVT from 'ol/format/MVT';
-import TileGrid from 'ol/tilegrid/TileGrid';
+import type VectorTile from 'ol/VectorTile';
+import type { FeatureLike } from 'ol/Feature';
 import { Fill, Stroke, Style } from 'ol/style';
 import CircleStyle from 'ol/style/Circle';
 import type { TileScheme } from '@wcad/tiling';
-import { resolution, tileCount } from '@wcad/tiling';
+import { createTileGrid } from './tileGrid.ts';
 
 /**
  * The backdrop layer (architecture doc sections 3 and 5).
@@ -36,54 +37,63 @@ export interface BackdropOptions {
   readonly tileServiceUrl: string;
   readonly layerIds?: readonly string[];
   onTileLoad?(ms: number): void;
-  onTileError?(url: string): void;
+  onTileError?(error: TileError): void;
 }
 
-/**
- * Tile grid in the PROJECT'S CRS, matching the server-side scheme exactly.
- *
- * Both sides must agree on origin, resolutions and tile size or the client requests tiles that
- * do not exist and renders the ones it gets in the wrong place — a failure that looks like a
- * projection bug and is not one.
- */
-export function createTileGrid(scheme: TileScheme): TileGrid {
-  const resolutions: number[] = [];
-  const sizes: Array<[number, number]> = [];
-  for (let z = 0; z <= scheme.maxZoom; z++) {
-    resolutions.push(resolution(scheme, z));
-    sizes.push([tileCount(z), tileCount(z)]);
-  }
-
-  return new TileGrid({
-    // OpenLayers expects the top-left corner, which is how TileScheme defines its origin.
-    origin: [scheme.origin[0], scheme.origin[1]],
-    resolutions,
-    tileSize: scheme.tilePixels,
-    sizes,
-  });
+/** Why a tile failed: enough to diagnose it without opening DevTools. */
+export interface TileError {
+  readonly url: string;
+  /** HTTP status, or 0 when the request never got a response (service down, network). */
+  readonly status: number;
+  readonly message: string;
 }
+
+export { createTileGrid };
 
 export function createBackdropLayer(opts: BackdropOptions): VectorTileLayer {
   const layerQuery = opts.layerIds?.length ? `?layers=${opts.layerIds.join(',')}` : '';
+  const format = new MVT();
 
   const source = new VectorTileSource({
-    format: new MVT(),
+    format,
     projection: opts.scheme.crs,
     tileGrid: createTileGrid(opts.scheme),
     url: `${opts.tileServiceUrl}/tiles/${opts.projectId}/{z}/{x}/{y}.mvt${layerQuery}`,
     // The backdrop is a cache-friendly read path; letting OpenLayers retry aggressively just
     // multiplies load during a pan.
     cacheSize: 512,
+    // Own loader rather than OpenLayers' default, for one reason: the default reports a failed
+    // tile with no URL, status or server message, which left "25 tile errors" in the status bar
+    // and nothing to diagnose it with. Decoding is unchanged — the same MVT format, same options.
+    tileLoadFunction: (tile, url) => {
+      const vt = tile as VectorTile<FeatureLike>;
+      // Not an async function: OpenLayers ignores the loader's return value, and its type wants
+      // void. The work runs in a promise the loader starts.
+      vt.setLoader((extent, _resolution, projection) => void (async () => {
+        try {
+          const res = await fetch(url);
+          if (!res.ok) {
+            opts.onTileError?.({ url, status: res.status, message: await errorMessage(res) });
+            vt.onError();
+            return;
+          }
+          const data = await res.arrayBuffer();
+          vt.setFeatures(format.readFeatures(data, { extent, featureProjection: projection }) as FeatureLike[]);
+        } catch (err) {
+          opts.onTileError?.({ url, status: 0, message: (err as Error).message || 'request failed' });
+          vt.onError();
+        }
+      })());
+    },
   });
 
-  if (opts.onTileLoad || opts.onTileError) {
+  if (opts.onTileLoad) {
     const started = new WeakMap<object, number>();
     source.on('tileloadstart', (e) => started.set(e.tile, performance.now()));
     source.on('tileloadend', (e) => {
       const t0 = started.get(e.tile);
       if (t0 !== undefined) opts.onTileLoad?.(performance.now() - t0);
     });
-    source.on('tileloaderror', () => opts.onTileError?.(source.getUrls()?.[0] ?? 'unknown'));
   }
 
   return new VectorTileLayer({
@@ -94,6 +104,17 @@ export function createBackdropLayer(opts: BackdropOptions): VectorTileLayer {
     // Drawn beneath the working set so edited geometry is always visually on top.
     zIndex: 0,
   });
+}
+
+/** The tile service answers errors as JSON { error, detail }; fall back to the raw text. */
+async function errorMessage(res: Response): Promise<string> {
+  const text = await res.text().catch(() => '');
+  try {
+    const body = JSON.parse(text) as { error?: string; detail?: string };
+    return [body.error, body.detail].filter(Boolean).join(': ') || res.statusText;
+  } catch {
+    return text.slice(0, 200) || res.statusText;
+  }
 }
 
 const BACKDROP_STROKE = new Stroke({ color: 'rgba(120, 150, 190, 0.75)', width: 1 });

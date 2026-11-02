@@ -5,3 +5,5 @@ coverage
 .git
 fixtures
 *.md
+
+.pnpm-store

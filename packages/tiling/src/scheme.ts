@@ -113,6 +113,24 @@ export function tileBBox(scheme: TileScheme, tile: TileCoord): BBox {
   return [minX, maxY - size, minX + size, maxY];
 }
 
+/**
+ * The area the pyramid covers: the zoom-0 tile, in CRS coordinates.
+ *
+ * Clients must bound their tile grid by exactly this. A grid without an extent lets the client
+ * request tiles beyond the pyramid whenever the view reaches past the project's edge — zooming
+ * out far enough always does — and every one of those requests is for a tile that cannot exist.
+ */
+export function pyramidExtent(scheme: TileScheme): BBox {
+  return [scheme.origin[0], scheme.origin[1] - scheme.z0Size, scheme.origin[0] + scheme.z0Size, scheme.origin[1]];
+}
+
+/** True when the tile exists in the pyramid. Unlike tileBBox, never throws. */
+export function isInPyramid(scheme: TileScheme, tile: TileCoord): boolean {
+  if (!Number.isInteger(tile.z) || tile.z < 0 || tile.z > scheme.maxZoom) return false;
+  const n = tileCount(tile.z);
+  return Number.isInteger(tile.x) && Number.isInteger(tile.y) && tile.x >= 0 && tile.y >= 0 && tile.x < n && tile.y < n;
+}
+
 /** Tile containing a point at zoom `z`, or null when the point is outside the pyramid. */
 export function tileContaining(scheme: TileScheme, z: number, point: Coord2): TileCoord | null {
   assertZoom(scheme, z);

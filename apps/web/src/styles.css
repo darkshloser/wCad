@@ -86,3 +86,34 @@ button.primary { background: var(--accent); border-color: var(--accent); width: 
 .status-bar .perf.good { color: #68d391; }
 .status-bar .perf.warn { color: #f6ad55; }
 .status-bar .perf.bad { color: #fc8181; }
+
+/* Toolbar icons */
+.tool-icon { vertical-align: -3px; margin-right: 4px; }
+
+/* Selection rectangle (knowledge/selection-spec.md §3.2). White line with a thin dark outline on
+   both sides so it stays visible over light and dark backgrounds alike. */
+.select-rect {
+  position: absolute;
+  pointer-events: none;
+  z-index: 5;
+  border: 1.5px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), inset 0 0 0 1px rgba(0, 0, 0, 0.55);
+  background: rgba(255, 255, 255, 0.06);
+}
+.select-rect[hidden] { display: none; }
+.select-rect.window { border-style: dashed; }
+.select-rect.crossing { border-style: dotted; border-width: 2px; }
+
+.status-bar .selection { padding: 0 6px; border-left: 1px solid var(--border); color: #f6ad55; }
+
+/* Drawing-area background (view menu, spec §4.1). */
+.map.bg-dark { background: #0b0f14; }
+.map.bg-light { background: #f4f6f8; }
+
+/* View menu */
+.context-menu .menu-heading {
+  padding: 6px 12px 4px; font-size: 11px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.context-menu .menu-separator { height: 1px; background: var(--border); margin: 3px 0; }
+.context-menu .menu-check { display: inline-block; width: 18px; color: #f6ad55; }

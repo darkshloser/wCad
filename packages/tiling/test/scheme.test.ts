@@ -8,7 +8,9 @@ import {
   type TileScheme,
   childTiles,
   createTileScheme,
+  isInPyramid,
   parentTile,
+  pyramidExtent,
   resolution,
   tileBBox,
   tileContaining,
@@ -241,5 +243,26 @@ describe('cache keys', () => {
       tileKey('p1', t, ['A', 'B']),
     ]);
     expect(keys.size).toBe(5);
+  });
+});
+
+describe('pyramid bounds (tile errors when zoomed out past the project edge)', () => {
+  const scheme = createTileScheme('EPSG:32635', [500000, 4700000, 501000, 4700500]);
+
+  it('pyramidExtent is exactly the zoom-0 tile', () => {
+    expect(pyramidExtent(scheme)).toEqual(tileBBox(scheme, { z: 0, x: 0, y: 0 }));
+  });
+
+  it('isInPyramid accepts every real tile and rejects the ones the client used to request', () => {
+    expect(isInPyramid(scheme, { z: 0, x: 0, y: 0 })).toBe(true);
+    expect(isInPyramid(scheme, { z: 3, x: 7, y: 7 })).toBe(true);
+    // Straight from the tile service log.
+    for (const [x, y] of [[1, 0], [3, 0], [1, 2], [2, 0], [2, 1], [0, 1], [1, 1]] as const) {
+      expect(isInPyramid(scheme, { z: 0, x, y }), `0/${x}/${y}`).toBe(false);
+    }
+    expect(isInPyramid(scheme, { z: 3, x: 8, y: 0 })).toBe(false);
+    expect(isInPyramid(scheme, { z: -1, x: 0, y: 0 })).toBe(false);
+    expect(isInPyramid(scheme, { z: scheme.maxZoom + 1, x: 0, y: 0 })).toBe(false);
+    expect(isInPyramid(scheme, { z: 1, x: 0.5, y: 0 })).toBe(false);
   });
 });
