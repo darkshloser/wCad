@@ -115,7 +115,7 @@ describe('tools (selection spec §1, §5, §6)', () => {
   it('classifies drawing tools', () => {
     expect(isDrawingTool('pan')).toBe(false);
     expect(isDrawingTool('select')).toBe(false);
-    for (const t of ['point', 'line', 'polygon', 'circle', 'arc3'] as const) expect(isDrawingTool(t)).toBe(true);
+    for (const t of ['point', 'line', 'polyline', 'polygon', 'circle', 'arc3'] as const) expect(isDrawingTool(t)).toBe(true);
   });
 
   it('maps F3 to the snap toggle, never while typing in a field (snapping spec §5)', () => {

@@ -85,7 +85,7 @@ export function SnapMenu(props: {
               <label
                 key={mode}
                 className={`snap-row ${unavailable ? 'unavailable' : ''}`}
-                title={unavailable ? 'Only while drawing a polyline or polygon' : undefined}
+                title={unavailable ? 'Only while drawing a line, polyline or polygon' : undefined}
               >
                 <input
                   type="checkbox"

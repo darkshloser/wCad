@@ -215,6 +215,7 @@ describe('Perpendicular', () => {
 
   it('§2 only Polyline and Polygon offer it', () => {
     expect(perpendicularAvailable('line')).toBe(true);
+    expect(perpendicularAvailable('polyline')).toBe(true);
     expect(perpendicularAvailable('polygon')).toBe(true);
     for (const t of ['point', 'circle', 'arc3', 'select', 'pan']) expect(perpendicularAvailable(t)).toBe(false);
   });

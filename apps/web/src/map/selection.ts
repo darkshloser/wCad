@@ -106,7 +106,7 @@ export type RightClickDecision =
 /**
  * Decides a right-click.
  *
- * Mid-shape in Polyline/Polygon, right-click finishes the shape (like Enter). Otherwise an object
+ * Mid-shape in Line/Polyline/Polygon, right-click finishes the shape (a Line chain ends) (like Enter). Otherwise an object
  * under the pointer opens the object menu in every tool, and empty space opens the view menu. Only
  * Select changes the selection on right-click; Pan and the drawing tools never select.
  */
@@ -115,7 +115,9 @@ export function rightClickDecision(
   hitId: string | null,
   current: ReadonlySet<string>,
 ): RightClickDecision {
-  if (ctx.sketching && (ctx.tool === 'line' || ctx.tool === 'polygon')) return { kind: 'finish-shape' };
+  if (ctx.sketching && (ctx.tool === 'line' || ctx.tool === 'polyline' || ctx.tool === 'polygon')) {
+    return { kind: 'finish-shape' };
+  }
   if (hitId !== null) {
     const selection = ctx.tool === 'select' ? contextMenuSelection(current, hitId) : new Set(current);
     return { kind: 'object-menu', elementId: hitId, selection };

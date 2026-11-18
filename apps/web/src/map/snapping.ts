@@ -54,9 +54,9 @@ export const DEFAULT_SNAP_MODES: ReadonlySet<SnapMode> = new Set<SnapMode>([
   'intersection',
 ]);
 
-/** Perpendicular needs a reference vertex, which only Polyline and Polygon have (spec §2). */
+/** Perpendicular needs a reference vertex, which only Line, Polyline and Polygon have (spec §2). */
 export function perpendicularAvailable(tool: string): boolean {
-  return tool === 'line' || tool === 'polygon';
+  return tool === 'line' || tool === 'polyline' || tool === 'polygon';
 }
 
 type XY = readonly [number, number];

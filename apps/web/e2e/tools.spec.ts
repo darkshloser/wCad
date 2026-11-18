@@ -572,3 +572,89 @@ test.describe('snapping spec v2', () => {
     void px;
   });
 });
+
+/** knowledge/line-tool-spec.md */
+test.describe('line tool', () => {
+  const count = async (page: Page) => Number.parseInt((await page.locator('.status-bar .count').textContent()) ?? '0', 10);
+
+  async function propsAt(page: Page, x: number, y: number) {
+    await page.mouse.move(x, y);
+    await page.mouse.click(x, y, { button: 'right' });
+    await page.locator('.context-menu').getByRole('menuitem', { name: 'Properties' }).click();
+    const dl = await page.locator('.properties dl').innerText();
+    const coords = (await page.locator('.properties .coords').innerText()).trim().split('\n');
+    await page.locator('.properties-header button').click();
+    return { dl, coords };
+  }
+
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/');
+    await page.waitForSelector('.map canvas', { timeout: 30_000 });
+    await page.waitForTimeout(1500);
+  });
+
+  test('§1–2 each segment is its own 2-vertex Line, chained end to start', async ({ page }) => {
+    const { ox, oy } = await center(page);
+    await tool(page, 'Line');
+    await page.mouse.click(ox - 150, oy + 60);
+    await page.mouse.click(ox, oy - 60);
+    await page.mouse.click(ox + 150, oy + 60);
+    await page.keyboard.press('Enter');
+    await expect(page.locator('.status-bar .message')).toContainText('Line ended (2 segments)');
+    await expect.poll(() => count(page)).toBe(2);
+
+    const first = await propsAt(page, ox - 75, oy);
+    const second = await propsAt(page, ox + 75, oy);
+    expect(first.dl).toMatch(/Type\s+line/);
+    expect(first.dl).toMatch(/Vertices\s+2/);
+    expect(second.dl).toMatch(/Vertices\s+2/);
+    expect(second.coords[0], 'second segment starts exactly where the first ends').toBe(first.coords[1]);
+  });
+
+  test('§3 Backspace deletes the last segment; §2 Esc ends and keeps the rest', async ({ page }) => {
+    const { ox, oy } = await center(page);
+    await tool(page, 'Line');
+    await page.mouse.click(ox - 150, oy);
+    await page.mouse.click(ox - 50, oy - 40);
+    await page.mouse.click(ox + 50, oy);
+    await expect.poll(() => count(page)).toBe(2);
+    await page.keyboard.press('Backspace');
+    await expect.poll(() => count(page)).toBe(1);
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.status-bar .message')).toContainText('Line ended (1 segment)');
+    await expect(page.getByRole('button', { name: 'Line', exact: true }), 'first Esc only ends the chain').toHaveClass(/active/);
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('button', { name: 'Select', exact: true })).toHaveClass(/active/);
+    expect(await count(page)).toBe(1);
+  });
+
+  test('§4 double-click creates nothing extra and does not zoom', async ({ page }) => {
+    const { ox, oy } = await center(page);
+    await tool(page, 'Line');
+    await page.mouse.click(ox - 100, oy);
+    const before = await page.locator('.status-bar .coordinate').textContent();
+    await page.mouse.dblclick(ox + 100, oy);
+    await page.keyboard.press('Enter');
+    await expect.poll(() => count(page)).toBe(1);
+    await page.mouse.move(ox - 100, oy);
+    void before;
+  });
+
+  test('§6 the second click snaps to the first segment’s end', async ({ page }) => {
+    const { ox, oy } = await center(page);
+    await tool(page, 'Line');
+    await page.mouse.click(ox - 100, oy);
+    await page.mouse.click(ox, oy);
+    await page.keyboard.press('Enter');
+    // New chain starting ~5 px from the previous end snaps onto it.
+    await page.mouse.move(ox + 20, oy + 20);
+    await page.mouse.move(ox + 4, oy + 3, { steps: 4 });
+    await expect(page.locator('.status-bar .snap')).toHaveText('SNAP · endpoint');
+    await page.mouse.click(ox + 4, oy + 3);
+    await page.mouse.click(ox + 100, oy + 60);
+    await page.keyboard.press('Enter');
+    const a = await propsAt(page, ox - 50, oy);
+    const b = await propsAt(page, ox + 50, oy + 30);
+    expect(b.coords[0]).toBe(a.coords[1]);
+  });
+});

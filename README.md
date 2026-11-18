@@ -83,6 +83,7 @@ Selection behaviour is specified in [knowledge/selection-spec.md](knowledge/sele
 | **Pan** (hand, default) | Drag moves the map; clicks do nothing | — |
 | **Select** | Click selects one object (replaces the selection); click empty space clears. Drag a rectangle: left→right (dashed) selects objects fully inside, right→left (dotted) selects anything touched. Shift adds, Ctrl removes. Right-click opens the menu (Properties, Delete). | Del deletes all selected, Esc clears |
 | **Point** | Each click places a point | Esc returns to Select |
+| **Line** | Click start, then each next point; every segment is its own Line object (AutoCAD LINE). Right-click ends | Enter or Esc ends, Backspace undoes the last segment |
 | **Polyline** | Click vertices; double-click or right-click finishes | Enter finishes, Backspace undoes a vertex, Esc cancels |
 | **Polygon** | Click at least 3 vertices; click the first vertex or double-click to close | same as Polyline |
 | **Circle** | Click the centre, then a point on the circle | Esc cancels |

@@ -3,7 +3,7 @@
 Read this at the start of a session to pick up where the last one stopped. Update it at the end of
 any session that changes status, decisions or open items.
 
-Last updated: 2026-11-17.
+Last updated: 2026-11-18.
 
 ---
 
@@ -43,7 +43,10 @@ Last updated: 2026-11-17.
 
 ## Web client (apps/web) — current behaviour
 
-- Toolbar: **Pan** (default), **Select**, Point, Polyline, Polygon, Circle, Arc (3 pt).
+- Toolbar: **Pan** (default), **Select**, Point, **Line**, Polyline, Polygon, Circle, Arc (3 pt).
+- Line tool: see [line-tool-spec.md](line-tool-spec.md) (implemented, awaiting review). AutoCAD-style
+  chain; each segment is an independent 2-vertex `line` object. Rules in `src/map/lineChain.ts`.
+  Note: the Polyline tool's internal id is now `polyline` (it was `line`).
 - Selection, right-click menus and keyboard: see [selection-spec.md](selection-spec.md) (agreed spec,
   implemented). Rules in `src/map/selection.ts`, tool rules in `src/map/toolRules.ts`, map wiring in
   `src/map/engine.ts`.
@@ -82,3 +85,6 @@ Last updated: 2026-11-17.
   vertex. Fixed: Esc closing the Snap menu also switched a drawing tool back to Select. Open
   question raised with the product owner: strict priority makes an Intersection within 10 px of a
   segment Midpoint unreachable without zooming in.
+- 2026-11-18: Line tool (chained independent 2-point Lines, Backspace undo, Enter/Esc/right-click
+  end, snapping incl. Perpendicular from the chain start, no double-click zoom). Next from the
+  product owner: Line drawing modes and geometric construction operations.

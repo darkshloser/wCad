@@ -11,7 +11,7 @@ import { Feature, Map as OlMap, View } from 'ol';
 import type { FeatureLike } from 'ol/Feature';
 import type MapBrowserEvent from 'ol/MapBrowserEvent';
 import { Circle as CircleGeom, LineString, MultiLineString, MultiPoint, Point, Polygon } from 'ol/geom';
-import { DragPan, Draw } from 'ol/interaction';
+import { DoubleClickZoom, DragPan, Draw } from 'ol/interaction';
 import Interaction from 'ol/interaction/Interaction';
 import PointerInteraction from 'ol/interaction/Pointer';
 import { Vector as VectorLayer } from 'ol/layer';
@@ -75,6 +75,7 @@ import {
   snapGeomFrom,
   snapStatusLabel,
 } from './snapping.ts';
+import { EMPTY_CHAIN, type LineChain, chainActive, lineClick, lineUndo, segmentRejected, segmentStored } from './lineChain.ts';
 
 export type { ToolName } from './toolRules.ts';
 
@@ -250,6 +251,9 @@ export class CadEngine {
   #gesture: SelectGesture | null = null;
   #rectEl: HTMLDivElement;
   #arcClicks: Coord3[] = [];
+  /** Line tool chain (knowledge/line-tool-spec.md). */
+  #lineChain: LineChain = EMPTY_CHAIN;
+  #doubleClickZoom: DoubleClickZoom | undefined;
   #tool: ToolName = DEFAULT_TOOL;
   #selectedIds: Set<string> = new Set();
   #hoverId: string | null = null;
@@ -337,6 +341,10 @@ export class CadEngine {
       .getInteractions()
       .getArray()
       .find((i): i is DragPan => i instanceof DragPan);
+    this.#doubleClickZoom = this.#map
+      .getInteractions()
+      .getArray()
+      .find((i): i is DoubleClickZoom => i instanceof DoubleClickZoom);
 
     // Our own snapping (knowledge/snapping-spec.md) instead of OpenLayers' Snap: the spec needs a
     // screen-pixel distance with a tie rule, exact stored coordinates, one visible target, F3/Alt,
@@ -398,6 +406,7 @@ export class CadEngine {
   setTool(tool: ToolName): void {
     this.#tool = tool;
     this.#resetArc();
+    this.#lineChain = EMPTY_CHAIN;
     this.#cancelGesture();
     this.#setHover(null);
     if (this.#draw) {
@@ -411,6 +420,8 @@ export class CadEngine {
     if (drawing) this.clearSelection();
 
     this.#dragPan?.setActive(tool !== 'select');
+    // Click-by-click tools: a double-click is two points, never a zoom (line spec §4).
+    this.#doubleClickZoom?.setActive(tool !== 'line' && tool !== 'arc3');
     this.#selectInteraction.setActive(tool === 'select');
     this.#snapInteraction.setActive(drawing);
     this.#setSnapTarget(null);
@@ -418,10 +429,11 @@ export class CadEngine {
     this.#setCursor(tool === 'pan' ? 'grab' : tool === 'select' ? 'default' : 'crosshair');
     this.#events.onStatus(TOOL_GUIDE[tool]);
 
-    if (!drawing || tool === 'arc3') return;
+    // Line and Arc place their points from map clicks themselves; the rest use OpenLayers' Draw.
+    if (!drawing || tool === 'arc3' || tool === 'line') return;
 
-    const type = { point: 'Point', line: 'LineString', polygon: 'Polygon', circle: 'Circle' }[
-      tool as 'point' | 'line' | 'polygon' | 'circle'
+    const type = { point: 'Point', polyline: 'LineString', polygon: 'Polygon', circle: 'Circle' }[
+      tool as 'point' | 'polyline' | 'polygon' | 'circle'
     ] as 'Point' | 'LineString' | 'Polygon' | 'Circle';
 
     this.#draw = new Draw({
@@ -442,7 +454,7 @@ export class CadEngine {
         if (geomType === 'Point' && this.#snapTarget) return [];
         return DRAW_EDITING_STYLE[geomType] ?? DRAW_EDITING_STYLE['Point']!;
       },
-      ...(tool === 'line' ? { minPoints: 2 } : {}),
+      ...(tool === 'polyline' ? { minPoints: 2 } : {}),
       ...(tool === 'polygon' ? { minPoints: 3 } : {}),
     });
     this.#draw.on('drawstart', (evt) => {
@@ -518,6 +530,10 @@ export class CadEngine {
       this.#onArcPoint(point);
       return;
     }
+    if (this.#tool === 'line') {
+      this.#onLinePoint([point[0], point[1]]);
+      return;
+    }
     if (this.#draw) {
       this.#draw.appendCoordinates([[point[0], point[1]]]);
       this.#events.onStatus(`Appended ${point[0].toFixed(3)}, ${point[1].toFixed(3)}`);
@@ -527,13 +543,21 @@ export class CadEngine {
   }
 
   finishDrawing(): void {
-    if (this.#tool === 'line' || this.#tool === 'polygon') this.#draw?.finishDrawing();
+    if (this.#tool === 'line') this.#endLineChain();
+    else if (this.#tool === 'polyline' || this.#tool === 'polygon') this.#draw?.finishDrawing();
   }
 
   abortDrawing(): void {
     this.#draw?.abortDrawing();
     this.#sketching = false;
     this.#resetArc();
+    // Ending a Line chain keeps the segments already created (line spec §2).
+    if (this.#tool === 'line') this.#endLineChain();
+  }
+
+  /** Something is being drawn: a Draw sketch, arc points, or a Line chain. */
+  #inProgress(): boolean {
+    return this.#sketching || this.#arcClicks.length > 0 || chainActive(this.#lineChain);
   }
 
   zoomToData(): void {
@@ -715,16 +739,20 @@ export class CadEngine {
     if (!evt.dragging && !this.#gesture) this.#setHover(this.#hitAt(evt.pixel));
     if (!isDrawingTool(this.#tool)) return;
     if (this.#tool === 'arc3') this.#renderArcSketch([c[0]!, c[1]!, 0]);
+    if (this.#tool === 'line') this.#renderLineSketch([c[0]!, c[1]!]);
     this.#ensureSnapCandidates(evt.coordinate);
   };
 
-  /** Map clicks matter only to the arc tool; Select uses its own gesture, Pan ignores clicks. */
+  /** Map clicks matter to Arc and Line; Select uses its own gesture, Pan ignores clicks. */
   #onClick = (evt: MapBrowserEvent): void => {
-    if (this.#tool !== 'arc3') return;
+    if (this.#tool !== 'arc3' && this.#tool !== 'line') return;
+    const button = (evt.originalEvent as MouseEvent | undefined)?.button ?? 0;
+    if (button !== 0) return;
     // Runs before the snapping interaction (see #onPointerMove), so snap explicitly.
     const target = this.#resolveSnap(evt.pixel, altKeyOf(evt));
     const c = target ? [target.x, target.y] : evt.coordinate;
-    this.#onArcPoint([c[0]!, c[1]!, 0]);
+    if (this.#tool === 'arc3') this.#onArcPoint([c[0]!, c[1]!, 0]);
+    else this.#onLinePoint([c[0]!, c[1]!]);
   };
 
   // ---------------------------------------------------------------------------- snapping
@@ -767,6 +795,10 @@ export class CadEngine {
    * repeats its first vertex), so the last PLACED vertex sits just before those.
    */
   #sketchReference(): [number, number] | null {
+    if (this.#tool === 'line') {
+      const s = this.#lineChain.start;
+      return s ? [s[0], s[1]] : null;
+    }
     const geom = this.#sketchFeature?.getGeometry();
     let c: number[] | undefined;
     if (geom instanceof LineString) {
@@ -901,7 +933,7 @@ export class CadEngine {
     e.preventDefault();
     const pixel: [number, number] = [e.clientX, e.clientY];
     const decision = rightClickDecision(
-      { tool: this.#tool, sketching: this.#sketching },
+      { tool: this.#tool, sketching: this.#inProgress() },
       this.#hitAt(this.#map.getEventPixel(e)),
       this.#selectedIds,
     );
@@ -948,9 +980,10 @@ export class CadEngine {
         // Esc during a rectangle drag cancels only the drag; otherwise it deselects everything.
         if (this.#gesture?.dragging && !this.#gesture.cancelled) this.#cancelGesture();
         else this.clearSelection();
-      } else if (this.#sketching || this.#arcClicks.length > 0) {
+      } else if (this.#inProgress()) {
+        const wasLine = this.#tool === 'line';
         this.abortDrawing();
-        this.#events.onStatus(`Cancelled. ${TOOL_GUIDE[this.#tool]}`);
+        if (!wasLine) this.#events.onStatus(`Cancelled. ${TOOL_GUIDE[this.#tool]}`);
       } else if (isDrawingTool(this.#tool)) {
         // Nothing in progress: a second Esc leaves the drawing tool, as in most CAD programs.
         this.#events.onRequestTool('select');
@@ -968,7 +1001,7 @@ export class CadEngine {
     }
 
     if (action === 'finish') {
-      if (this.#sketching) {
+      if (this.#inProgress()) {
         e.preventDefault();
         this.finishDrawing();
       }
@@ -981,7 +1014,10 @@ export class CadEngine {
         this.#arcClicks.pop();
         this.#renderArcSketch();
         this.#events.onStatus(`Arc point removed; ${this.#arcClicks.length} of 3 captured.`);
-      } else if (this.#sketching && (this.#tool === 'line' || this.#tool === 'polygon')) {
+      } else if (this.#tool === 'line' && chainActive(this.#lineChain)) {
+        e.preventDefault();
+        void this.#undoLineSegment();
+      } else if (this.#sketching && (this.#tool === 'polyline' || this.#tool === 'polygon')) {
         e.preventDefault();
         this.#draw?.removeLastPoint();
       }
@@ -990,6 +1026,95 @@ export class CadEngine {
 
   #setCursor(cursor: string): void {
     this.#map.getViewport().style.cursor = cursor;
+  }
+
+  // ---------------------------------------------------------------------------- line
+
+  /**
+   * A click or typed point in the Line tool (line spec §2, §4). The first point starts the chain;
+   * every next point stores one independent two-point Line and the chain continues from it.
+   */
+  #onLinePoint(p: readonly [number, number]): void {
+    const r = lineClick(this.#lineChain, p);
+    this.#lineChain = r.chain;
+    this.#renderLineSketch();
+    if (r.kind === 'start') {
+      this.#events.onStatus('Line: start point placed. Click the next point.');
+      return;
+    }
+    if (r.kind === 'ignored') return;
+    void this.#persistLineSegment(r.from, r.to);
+  }
+
+  async #persistLineSegment(from: readonly [number, number], to: readonly [number, number]): Promise<void> {
+    const res = await this.#store.commit(this.#projectId, [
+      {
+        op: 'create',
+        element: {
+          projectId: this.#projectId,
+          layerId: 'default',
+          kind: 'line',
+          crs: this.#crsCode,
+          coords: [
+            [from[0], from[1], 0],
+            [to[0], to[1], 0],
+          ],
+        },
+      },
+    ]);
+    if (!res.ok || !res.ids[0]) {
+      this.#lineChain = segmentRejected(this.#lineChain, from, to);
+      this.#events.onStatus('Line segment rejected by the store.');
+      return;
+    }
+    this.#lineChain = segmentStored(this.#lineChain, from, to, res.ids[0]);
+    await this.#reloadViewport();
+    // Only while the chain is still going: a save finishing after Enter must not overwrite the
+    // "Line ended" message.
+    if (this.#tool === 'line' && chainActive(this.#lineChain)) {
+      this.#events.onStatus(
+        'Line created. Click the next point; Enter, right-click or Esc ends; Backspace undoes the last segment.',
+      );
+    }
+  }
+
+  /** Backspace in the Line tool (line spec §3): delete the last segment and step back. */
+  async #undoLineSegment(): Promise<void> {
+    const u = lineUndo(this.#lineChain);
+    if (u.kind === 'pending') {
+      this.#events.onStatus('Still saving the last segment — try again.');
+      return;
+    }
+    this.#lineChain = u.chain;
+    this.#renderLineSketch();
+    if (u.kind === 'drop-start') {
+      this.#events.onStatus(TOOL_GUIDE.line);
+      return;
+    }
+    if (u.kind !== 'delete-segment') return;
+    const [rec] = await this.#store.getExact([u.id]);
+    if (rec) await this.#store.commit(this.#projectId, [{ op: 'delete', id: rec.id, baseVersion: rec.version }]);
+    await this.#reloadViewport();
+    this.#events.onStatus('Last segment removed. Click the next point, or Backspace again.');
+  }
+
+  #endLineChain(): void {
+    const had = chainActive(this.#lineChain);
+    const n = this.#lineChain.segments.length;
+    this.#lineChain = EMPTY_CHAIN;
+    this.#sketchSource.clear();
+    if (had) this.#events.onStatus(`Line ended (${n} segment${n === 1 ? '' : 's'}). ${TOOL_GUIDE.line}`);
+  }
+
+  /** Start point and a dashed preview from it to the cursor (line spec §2). */
+  #renderLineSketch(cursor?: readonly [number, number]): void {
+    this.#sketchSource.clear();
+    const s = this.#lineChain.start;
+    if (!s) return;
+    this.#sketchSource.addFeature(new Feature(new Point([s[0], s[1]])));
+    if (cursor) {
+      this.#sketchSource.addFeature(new Feature(new LineString([[s[0], s[1]], [cursor[0], cursor[1]]])));
+    }
   }
 
   // ---------------------------------------------------------------------------- arc
@@ -1233,6 +1358,7 @@ function describeKind(kind: ElementKind | undefined): string {
     case 'point':
       return 'Point';
     case 'line':
+      return 'Line';
     case 'polyline':
       return 'Polyline';
     case 'polygon':

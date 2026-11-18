@@ -124,7 +124,7 @@ describe('§4 / §4.1 / §6 right-click decision', () => {
   });
 
   it('Pan and drawing tools: object opens the menu but never changes the selection', () => {
-    for (const tool of ['pan', 'point', 'line', 'polygon', 'circle', 'arc3']) {
+    for (const tool of ['pan', 'point', 'line', 'polyline', 'polygon', 'circle', 'arc3']) {
       const d = rightClickDecision({ tool, ...none }, 'c', sel('a'));
       expect(d.kind, tool).toBe('object-menu');
       expect(sorted(d.selection), tool).toEqual(['a']);
@@ -132,7 +132,7 @@ describe('§4 / §4.1 / §6 right-click decision', () => {
   });
 
   it('empty space opens the view menu in every tool, selection unchanged', () => {
-    for (const tool of ['pan', 'select', 'point', 'line', 'polygon', 'circle', 'arc3']) {
+    for (const tool of ['pan', 'select', 'point', 'line', 'polyline', 'polygon', 'circle', 'arc3']) {
       const d = rightClickDecision({ tool, ...none }, null, sel('a'));
       expect(d.kind, tool).toBe('view-menu');
       expect(sorted(d.selection), tool).toEqual(['a']);
@@ -141,6 +141,7 @@ describe('§4 / §4.1 / §6 right-click decision', () => {
 
   it('mid-shape in Polyline/Polygon, right-click finishes the shape even over an object', () => {
     expect(rightClickDecision({ tool: 'line', sketching: true }, 'c', sel()).kind).toBe('finish-shape');
+    expect(rightClickDecision({ tool: 'polyline', sketching: true }, 'c', sel()).kind).toBe('finish-shape');
     expect(rightClickDecision({ tool: 'polygon', sketching: true }, null, sel()).kind).toBe('finish-shape');
   });
 

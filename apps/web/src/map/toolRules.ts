@@ -17,7 +17,7 @@
 
 import type { ElementKind } from '@wcad/geo-core';
 
-export type ToolName = 'pan' | 'select' | 'point' | 'line' | 'polygon' | 'circle' | 'arc3';
+export type ToolName = 'pan' | 'select' | 'point' | 'line' | 'polyline' | 'polygon' | 'circle' | 'arc3';
 
 /** The tool active when the app opens (knowledge/selection-spec.md §1). */
 export const DEFAULT_TOOL: ToolName = 'pan';
@@ -37,6 +37,9 @@ export const TOOL_GUIDE: Record<ToolName, string> = {
     'right→left selects anything touched. Shift adds, Ctrl removes. Right-click for the menu, Del deletes, Esc clears.',
   point: 'Point: click to place a point, or type a coordinate. Each click places another. Esc to stop.',
   line:
+    'Line: click the start point, then each next point — every segment is its own Line. ' +
+    'Enter, right-click or Esc ends; Backspace undoes the last segment.',
+  polyline:
     'Polyline: click each vertex, double-click or Enter to finish. ' +
     'Backspace removes the last vertex, Esc cancels.',
   polygon:

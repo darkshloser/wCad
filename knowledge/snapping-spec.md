@@ -5,7 +5,7 @@ Status: **agreed with the product owner (2026-11-17); implemented** — rules an
 `apps/web/test/`), map wiring in `apps/web/src/map/engine.ts`, menu in
 `apps/web/src/components/SnapMenu.tsx`, browser tests in `apps/web/e2e/tools.spec.ts`
 ("snapping spec").
-Scope: the web client (`apps/web`), drawing tools Point, Polyline, Polygon, Circle, Arc (3 pt).
+Scope: the web client (`apps/web`), drawing tools Point, Line, Polyline, Polygon, Circle, Arc (3 pt).
 Related: [selection-spec.md](selection-spec.md) §6 (drawing tools never select; no snap markers
 other than the single active target).
 
@@ -36,13 +36,14 @@ end, and every inner polyline vertex is the end of one segment and the start of 
 
 ## 2. Availability
 
-| Mode | Point | Polyline | Polygon | Circle | Arc |
-|---|---|---|---|---|---|
-| Endpoint, Midpoint, Centre, Intersection, Nearest | Yes | Yes | Yes | Yes | Yes |
-| Perpendicular | No | Yes* | Yes* | No | No |
+| Mode | Point | Line | Polyline | Polygon | Circle | Arc |
+|---|---|---|---|---|---|---|
+| Endpoint, Midpoint, Centre, Intersection, Nearest | Yes | Yes | Yes | Yes | Yes | Yes |
+| Perpendicular | No | Yes* | Yes* | Yes* | No | No |
 
 \* Only once at least one vertex has been placed. The **reference point** is the last placed vertex
-of the shape being drawn (clicked, snapped or typed). On the first click there is nothing to be
+of the shape being drawn (clicked, snapped or typed); for the Line tool, the start of the next
+segment ([line-tool-spec.md](line-tool-spec.md) §6). On the first click there is nothing to be
 perpendicular to, so the mode is inactive.
 
 Availability is decided by the active tool, not only by the checkbox: a ticked Perpendicular does
@@ -91,7 +92,7 @@ nothing in Point, Circle or Arc.
 ## 6. Clicking
 
 - A click while a target is shown places the point **at the target**, not where the mouse is.
-- Applies to every click of every drawing tool: Point; every vertex of Polyline/Polygon; Circle
+- Applies to every click of every drawing tool: Point; every point of Line; every vertex of Polyline/Polygon; Circle
   centre and radius point; all three Arc points.
 - With no target, the click lands exactly at the cursor.
 - A Polygon still closes by clicking its own first vertex.
@@ -106,8 +107,8 @@ nothing in Point, Circle or Arc.
   - One row per mode in priority order: icon (the mode's marker), label, checkbox.
   - **Select all** / **Clear all**.
 - Clicking a row toggles it; the menu stays open. Clicking outside or Esc closes it.
-- Perpendicular is shown greyed out, with the tooltip "Only while drawing a polyline or polygon",
-  when the active tool is not Polyline or Polygon.
+- Perpendicular is shown greyed out, with the tooltip "Only while drawing a line, polyline or polygon",
+  when the active tool is not Line, Polyline or Polygon.
 - Ticked modes are **remembered per browser**; unreadable saved settings fall back to the defaults.
   Switching tools never changes them.
 

@@ -18,6 +18,7 @@ that changed any of those.
 | Project status, open items, handoff | [knowledge/project-status.md](knowledge/project-status.md) |
 | Selection, Pan tool, right-click menu, keyboard | [knowledge/selection-spec.md](knowledge/selection-spec.md) |
 | Snapping while drawing | [knowledge/snapping-spec.md](knowledge/snapping-spec.md) |
+| Line tool | [knowledge/line-tool-spec.md](knowledge/line-tool-spec.md) |
 | Architecture and principles P1–P6, guardrails G1–G4 | [docs/CAD-GIS-Web-App-Architecture.md](docs/CAD-GIS-Web-App-Architecture.md) |
 | Phases, exit criteria, budgets | [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md) |
 
