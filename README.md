@@ -93,6 +93,8 @@ Right-click on an object opens its menu (Properties, Delete) in every tool; righ
 
 While drawing, the cursor snaps within 10 px to Endpoint, Midpoint, Centre, Intersection, Perpendicular or Nearest — choose modes in the **Snap ▾** toolbar menu (remembered per browser); a green marker shows the target and the click lands on its exact coordinate. F3 toggles snapping, holding Alt suspends it. See [knowledge/snapping-spec.md](knowledge/snapping-spec.md).
 
+While an object is being drawn it uses one shared in-progress style in every tool: the placed part solid, the rubber band to the cursor dashed, square vertices and a crosshair cursor, white-grey on the dark background and dark grey on the light one — see [knowledge/drawing-style-spec.md](knowledge/drawing-style-spec.md).
+
 The wheel zooms in every tool. Select is **read-only**: there is no Modify or Translate interaction on the map. The properties panel opens only from right-click → Properties. Only working-set objects (drawn in the app) are selectable; imported backdrop objects become selectable in Phase 4.
 
 ## What Phase 3 delivers so far

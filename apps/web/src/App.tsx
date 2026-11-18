@@ -97,6 +97,7 @@ export function App() {
   const [view, setView] = useState<ViewSettings>(() => loadViewSettings(browserStorage()));
   const updateView = useCallback((patch: Partial<ViewSettings>) => setView((v) => ({ ...v, ...patch })), []);
   const basemap = view.basemap;
+  const viewRef = useRef(view);
   // The properties panel opens only from the right-click menu, never on selection
   // (knowledge/selection-spec.md §4), so it tracks its own object rather than the selection.
   const [properties, setProperties] = useState<ElementRecord | null>(null);
@@ -170,6 +171,7 @@ export function App() {
       );
       engineRef.current = engine;
       engine.setBasemapVisible(basemap);
+      engine.setBackground(viewRef.current.background);
       engine.setTool(tool);
       engine.setSnapModes(snapModesRef.current);
     })();
@@ -196,6 +198,12 @@ export function App() {
   useEffect(() => {
     engineRef.current?.setBasemapVisible(basemap);
   }, [basemap]);
+
+  // The in-progress drawing style follows the drawing-area background (drawing-style spec §2).
+  useEffect(() => {
+    viewRef.current = view;
+    engineRef.current?.setBackground(view.background);
+  }, [view.background]);
 
   useEffect(() => {
     saveViewSettings(browserStorage(), view);

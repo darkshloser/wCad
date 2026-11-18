@@ -19,7 +19,6 @@ import TileLayer from 'ol/layer/Tile';
 import { Vector as VectorSource } from 'ol/source';
 import OSM from 'ol/source/OSM';
 import { Circle as CircleStyle, Fill, RegularShape, Stroke, Style } from 'ol/style';
-import { createEditingStyle } from 'ol/style/Style';
 import { get as getProjection } from 'ol/proj';
 import { register } from 'ol/proj/proj4';
 import proj4 from 'proj4';
@@ -75,6 +74,8 @@ import {
   snapGeomFrom,
   snapStatusLabel,
 } from './snapping.ts';
+import { type SketchContext, SketchStyles } from './sketchStyle.ts';
+import type { Background } from './sketchGeometry.ts';
 import { EMPTY_CHAIN, type LineChain, chainActive, lineClick, lineUndo, segmentRejected, segmentStored } from './lineChain.ts';
 
 export type { ToolName } from './toolRules.ts';
@@ -162,15 +163,6 @@ const VERTEX_MARK = new RegularShape({
   stroke: new Stroke({ color: SELECT_COLOR, width: 1.5 }),
 });
 
-const SKETCH_STYLE = new Style({
-  stroke: new Stroke({ color: '#d69e2e', width: 2, lineDash: [6, 4] }),
-  image: new CircleStyle({
-    radius: 4,
-    fill: new Fill({ color: '#ffffff' }),
-    stroke: new Stroke({ color: '#d69e2e', width: 2 }),
-  }),
-});
-
 const SNAP_COLOR = '#22c55e';
 
 // The single active snap target (snapping spec §5): one marker shape per mode, AutoCAD-style. A
@@ -197,9 +189,6 @@ const SNAP_CENTRE_STYLE = [
 const SNAP_INTERSECTION_STYLE = new Style({
   image: new RegularShape({ points: 4, radius: 9, radius2: 0, angle: Math.PI / 4, stroke: SNAP_STROKE }),
 });
-
-// OpenLayers' default sketch styles, reused so only the snapped cursor changes.
-const DRAW_EDITING_STYLE = createEditingStyle();
 
 const WORKING_Z = 10;
 
@@ -253,6 +242,11 @@ export class CadEngine {
   #arcClicks: Coord3[] = [];
   /** Line tool chain (knowledge/line-tool-spec.md). */
   #lineChain: LineChain = EMPTY_CHAIN;
+  /** The one in-progress style for every drawing tool (knowledge/drawing-style-spec.md). */
+  #sketchStyles = new SketchStyles('dark');
+  #sketchLayer!: VectorLayer<VectorSource<Feature>>;
+  /** Last (snapped) cursor position, for the circle radius guide. */
+  #lastCursor: [number, number] | null = null;
   #doubleClickZoom: DoubleClickZoom | undefined;
   #tool: ToolName = DEFAULT_TOOL;
   #selectedIds: Set<string> = new Set();
@@ -289,7 +283,11 @@ export class CadEngine {
     // Style is a function of the selection, not baked into features: the working set is rebuilt
     // from the store on every pan, and a highlight stored on a feature would vanish with it.
     this.#workingLayer = new VectorLayer({ source: this.#workingSource, style: this.#styleFor });
-    const sketchLayer = new VectorLayer({ source: this.#sketchSource, style: SKETCH_STYLE });
+    const sketchLayer = new VectorLayer({
+      source: this.#sketchSource,
+      style: (feature) => this.#sketchStyles.forRole(feature, this.#sketchContext()),
+    });
+    this.#sketchLayer = sketchLayer;
     const snapLayer = new VectorLayer({ source: this.#snapIndicatorSource, style: snapIndicatorStyle });
 
     const projection = getProjection(this.#crsCode) ?? undefined;
@@ -447,13 +445,9 @@ export class CadEngine {
         const o = e.originalEvent as PointerEvent;
         return o.button === 0 && !o.ctrlKey && !o.metaKey && !o.shiftKey;
       },
-      // OpenLayers draws its sketch cursor above every layer, which hid the snap marker. While a
-      // target is active the cursor is not drawn, so the one thing shown is the target (spec §3).
-      style: (feature) => {
-        const geomType = feature.getGeometry()?.getType() ?? 'Point';
-        if (geomType === 'Point' && this.#snapTarget) return [];
-        return DRAW_EDITING_STYLE[geomType] ?? DRAW_EDITING_STYLE['Point']!;
-      },
+      // The shared in-progress style instead of OpenLayers' default (drawing-style spec §1). It
+      // also hides the crosshair while a snap target is shown (spec §4).
+      style: (feature) => this.#sketchStyles.forDraw(feature, this.#tool, this.#sketchContext()),
       ...(tool === 'polyline' ? { minPoints: 2 } : {}),
       ...(tool === 'polygon' ? { minPoints: 3 } : {}),
     });
@@ -485,6 +479,17 @@ export class CadEngine {
     if (id === this.#menuTargetId) return;
     this.#menuTargetId = id;
     this.#workingLayer.changed();
+  }
+
+  /** Restyles drawing in progress for the drawing-area background (drawing-style spec §2). */
+  setBackground(bg: Background): void {
+    this.#sketchStyles = new SketchStyles(bg);
+    this.#sketchLayer.changed();
+    this.#draw?.getOverlay().changed();
+  }
+
+  #sketchContext(): SketchContext {
+    return { snapped: this.#snapTarget !== null, cursor: this.#lastCursor };
   }
 
   /** Clears the selection and its highlight. */
@@ -733,6 +738,7 @@ export class CadEngine {
     const target = isDrawingTool(this.#tool) ? this.#resolveSnap(evt.pixel, altKeyOf(evt)) : null;
     this.#setSnapTarget(target);
     const c = target ? [target.x, target.y] : evt.coordinate;
+    this.#lastCursor = [c[0]!, c[1]!];
     this.#events.onPointerMove([c[0]!, c[1]!, 0]);
 
     // Hover highlights in every tool, so the user sees what a right-click will act on (spec §3.3).
@@ -831,6 +837,7 @@ export class CadEngine {
     if (same) return;
     this.#snapTarget = target;
     this.#draw?.getOverlay().changed();
+    this.#sketchLayer.changed();
     this.#snapIndicatorSource.clear();
     if (target) {
       const f = new Feature(new Point([target.x, target.y]));
@@ -1111,9 +1118,10 @@ export class CadEngine {
     this.#sketchSource.clear();
     const s = this.#lineChain.start;
     if (!s) return;
-    this.#sketchSource.addFeature(new Feature(new Point([s[0], s[1]])));
+    this.#sketchSource.addFeature(sketchFeature(new Point([s[0], s[1]]), 'vertex'));
     if (cursor) {
-      this.#sketchSource.addFeature(new Feature(new LineString([[s[0], s[1]], [cursor[0], cursor[1]]])));
+      this.#sketchSource.addFeature(sketchFeature(new LineString([[s[0], s[1]], [cursor[0], cursor[1]]]), 'rubber'));
+      this.#sketchSource.addFeature(sketchFeature(new Point([cursor[0], cursor[1]]), 'cursor'));
     }
   }
 
@@ -1150,22 +1158,24 @@ export class CadEngine {
    */
   #renderArcSketch(cursor?: Coord3): void {
     this.#sketchSource.clear();
-    for (const p of this.#arcClicks) this.#sketchSource.addFeature(new Feature(new Point([p[0], p[1]])));
-    if (!cursor || this.#arcClicks.length === 0) return;
+    for (const p of this.#arcClicks) this.#sketchSource.addFeature(sketchFeature(new Point([p[0], p[1]]), 'vertex'));
+    if (!cursor) return;
+    this.#sketchSource.addFeature(sketchFeature(new Point([cursor[0], cursor[1]]), 'cursor'));
+    if (this.#arcClicks.length === 0) return;
 
     const [a, b] = this.#arcClicks;
     if (this.#arcClicks.length === 1) {
-      this.#sketchSource.addFeature(new Feature(new LineString([[a![0], a![1]], [cursor[0], cursor[1]]])));
+      this.#sketchSource.addFeature(sketchFeature(new LineString([[a![0], a![1]], [cursor[0], cursor[1]]]), 'rubber'));
       return;
     }
     try {
       const arc = arcFrom3Points([a![0], a![1]], [b![0], b![1]], [cursor[0], cursor[1]]);
       const pts = tessellate(arc, this.#displayTolerance());
-      this.#sketchSource.addFeature(new Feature(new LineString(pts.map((p) => [p[0], p[1]]))));
+      this.#sketchSource.addFeature(sketchFeature(new LineString(pts.map((p) => [p[0], p[1]])), 'rubber'));
     } catch {
       // Collinear or coincident so far: no arc exists yet, so show the straight path instead.
       this.#sketchSource.addFeature(
-        new Feature(new LineString([[a![0], a![1]], [b![0], b![1]], [cursor[0], cursor[1]]])),
+        sketchFeature(new LineString([[a![0], a![1]], [b![0], b![1]], [cursor[0], cursor[1]]]), 'rubber'),
       );
     }
   }
@@ -1330,6 +1340,13 @@ function snapIndicatorStyle(feature: FeatureLike, resolution: number): Style | S
     default:
       return SNAP_ENDPOINT_STYLE;
   }
+}
+
+/** A feature for the engine-drawn sketch layer (Line and Arc tools), tagged with its role. */
+function sketchFeature(geometry: Point | LineString, role: 'vertex' | 'rubber' | 'cursor'): Feature {
+  const f = new Feature(geometry);
+  f.set('role', role);
+  return f;
 }
 
 function altKeyOf(evt: MapBrowserEvent): boolean {

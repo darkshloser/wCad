@@ -54,6 +54,8 @@ Last updated: 2026-11-18.
   Endpoint, Midpoint, Centre, Intersection, Perpendicular, Nearest (strict priority in that order),
   one marker per mode, **Snap ▾** toolbar menu with checkboxes, remembered per browser; F3 toggles,
   Alt suspends. Engine in `src/map/snapping.ts`, menu in `src/components/SnapMenu.tsx`.
+- In-progress drawing style: see [drawing-style-spec.md](drawing-style-spec.md) (option B "white
+  construction", agreed, implemented) — one style for all six drawing tools, follows the background.
 - View menu (right-click empty space): Basemap, Dark/Light background, Performance readout;
   saved per browser (`src/viewSettings.ts`).
 - Backdrop tile grid is bounded by the pyramid extent (`src/map/tileGrid.ts`). Tile failures are
@@ -88,3 +90,5 @@ Last updated: 2026-11-18.
 - 2026-11-18: Line tool (chained independent 2-point Lines, Backspace undo, Enter/Esc/right-click
   end, snapping incl. Perpendicular from the chain start, no double-click zoom). Next from the
   product owner: Line drawing modes and geometric construction operations.
+- 2026-11-18: Unified in-progress drawing style (option B) for Point, Line, Polyline, Polygon,
+  Circle and Arc, replacing OpenLayers' default sketch style and the old gold dashed sketch.
