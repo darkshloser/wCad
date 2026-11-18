@@ -117,3 +117,29 @@ button.primary { background: var(--accent); border-color: var(--accent); width: 
 }
 .context-menu .menu-separator { height: 1px; background: var(--border); margin: 3px 0; }
 .context-menu .menu-check { display: inline-block; width: 18px; color: #f6ad55; }
+
+/* Snap indicator in the status bar (snapping spec §3, §5). */
+.status-bar .snap { padding: 0 6px; border-left: 1px solid var(--border); color: var(--muted); font-weight: 600; }
+.status-bar .snap.active { color: #22c55e; }
+.status-bar .snap.off { color: #fc8181; }
+
+/* Snap menu (snapping spec §7). */
+.snap-menu { position: relative; display: inline-block; }
+.snap-button { display: inline-flex; align-items: center; gap: 4px; }
+.snap-button.on { color: #22c55e; }
+.snap-button.off { color: var(--muted); }
+.snap-dropdown {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; min-width: 210px;
+  display: flex; flex-direction: column; padding: 4px 0;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+.snap-row { display: flex; align-items: center; gap: 8px; padding: 5px 12px; cursor: pointer; color: var(--text); }
+.snap-row:hover { background: #222b38; }
+.snap-row.unavailable { color: var(--muted); cursor: not-allowed; opacity: 0.55; }
+.snap-row .snap-label { flex: 1; }
+.snap-row kbd { font-size: 11px; color: var(--muted); }
+.snap-icon { color: #22c55e; flex: none; }
+.snap-row.unavailable .snap-icon { color: var(--muted); }
+.snap-actions { display: flex; gap: 6px; padding: 4px 12px; }
+.snap-actions button { flex: 1; }

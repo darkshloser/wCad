@@ -118,6 +118,12 @@ describe('tools (selection spec §1, §5, §6)', () => {
     for (const t of ['point', 'line', 'polygon', 'circle', 'arc3'] as const) expect(isDrawingTool(t)).toBe(true);
   });
 
+  it('maps F3 to the snap toggle, never while typing in a field (snapping spec §5)', () => {
+    expect(keyAction('F3', 'BODY')).toBe('toggle-snap');
+    expect(keyAction('F3', 'INPUT')).toBeNull();
+    expect(keyAction('F3', 'TEXTAREA')).toBeNull();
+  });
+
   it('maps Delete on the map, never while typing in a field', () => {
     expect(keyAction('Delete', 'BODY')).toBe('delete');
     expect(keyAction('Delete', 'INPUT')).toBeNull();

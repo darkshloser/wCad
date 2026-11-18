@@ -20,6 +20,8 @@ import { MemoryStore } from '@wcad/store-contract';
 import type { ElementRecord, GeometryStore } from '@wcad/store-contract';
 import { CadEngine, type ContextMenuRequest, type ToolName } from './map/engine.ts';
 import { type ViewSettings, loadViewSettings, saveViewSettings } from './viewSettings.ts';
+import { loadSnapModes, saveSnapModes } from './snapSettings.ts';
+import type { SnapMode } from './map/snapping.ts';
 import { DEFAULT_TOOL } from './map/toolRules.ts';
 import type { PerfSnapshot } from './map/instrumentation.ts';
 import { Toolbar } from './components/Toolbar.tsx';
@@ -100,6 +102,12 @@ export function App() {
   const [properties, setProperties] = useState<ElementRecord | null>(null);
   const [menu, setMenu] = useState<ContextMenuRequest | null>(null);
   const [selectedCount, setSelectedCount] = useState(0);
+  const [snapLabel, setSnapLabel] = useState('SNAP');
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  // Ticked snap modes, remembered per browser (snapping spec §7). Held in a ref too, so a map
+  // rebuilt on a CRS change starts with the current choice rather than the one at first render.
+  const [snapModes, setSnapModes] = useState<Set<SnapMode>>(() => loadSnapModes(browserStorage()));
+  const snapModesRef = useRef(snapModes);
   const [count, setCount] = useState(0);
   const [lastPoint, setLastPoint] = useState<Coord3 | null>(null);
   const [perf, setPerf] = useState<PerfSnapshot | null>(null);
@@ -151,6 +159,10 @@ export function App() {
           onRequestTool: setTool,
           onElementsChanged: () => void store.count(LOCAL_PROJECT_ID).then(setCount),
           onStatus: setStatus,
+          onSnapState: (state) => {
+            setSnapLabel(state.label);
+            setSnapEnabled(state.enabled);
+          },
         },
         TILE_SERVICE_URL && project
           ? { tileServiceUrl: TILE_SERVICE_URL, projectExtent: project.extent }
@@ -159,6 +171,7 @@ export function App() {
       engineRef.current = engine;
       engine.setBasemapVisible(basemap);
       engine.setTool(tool);
+      engine.setSnapModes(snapModesRef.current);
     })();
 
     return () => {
@@ -187,6 +200,12 @@ export function App() {
   useEffect(() => {
     saveViewSettings(browserStorage(), view);
   }, [view]);
+
+  useEffect(() => {
+    snapModesRef.current = snapModes;
+    engineRef.current?.setSnapModes(snapModes);
+    saveSnapModes(browserStorage(), snapModes);
+  }, [snapModes]);
 
   // A closed menu no longer marks its object (spec §4).
   useEffect(() => {
@@ -260,6 +279,12 @@ export function App() {
         onFinish={() => engineRef.current?.finishDrawing()}
         onAbort={() => engineRef.current?.abortDrawing()}
         onZoomToData={() => engineRef.current?.zoomToData()}
+        snap={{
+          enabled: snapEnabled,
+          modes: snapModes,
+          onEnabled: (on) => engineRef.current?.setSnapEnabled(on),
+          onModes: setSnapModes,
+        }}
       />
 
       <div className="workspace">
@@ -305,6 +330,7 @@ export function App() {
         crs={crs}
         elementCount={count}
         selectedCount={selectedCount}
+        snapLabel={snapLabel}
         perf={view.showPerf ? perf : null}
       />
     </div>

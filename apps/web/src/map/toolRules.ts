@@ -135,7 +135,7 @@ function samePoint(a: XY, b: XY): boolean {
 }
 
 /** Keys the map reacts to. Ignored while the user is typing in a field. */
-export type KeyAction = 'finish' | 'cancel' | 'undo-vertex' | 'delete' | null;
+export type KeyAction = 'finish' | 'cancel' | 'undo-vertex' | 'delete' | 'toggle-snap' | null;
 
 export function keyAction(key: string, targetTag: string | undefined): KeyAction {
   const tag = (targetTag ?? '').toUpperCase();
@@ -146,5 +146,6 @@ export function keyAction(key: string, targetTag: string | undefined): KeyAction
   if (key === 'Enter') return 'finish';
   if (key === 'Backspace') return 'undo-vertex';
   if (key === 'Delete') return 'delete';
+  if (key === 'F3') return 'toggle-snap';
   return null;
 }

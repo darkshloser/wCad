@@ -366,3 +366,209 @@ test.describe('selection spec', () => {
     await page.evaluate(() => localStorage.removeItem('wcad.viewSettings.v1'));
   });
 });
+
+/**
+ * knowledge/snapping-spec.md. The decisive check is §4: a click a few pixels off a snap target
+ * stores the target's exact coordinates, verified through the Properties panel of both objects.
+ */
+test.describe('snapping spec', () => {
+  const snapLabel = (page: Page) => page.locator('.status-bar .snap');
+
+  async function coordsOf(page: Page, x: number, y: number): Promise<string> {
+    await page.mouse.move(x, y);
+    await page.mouse.click(x, y, { button: 'right' });
+    await page.locator('.context-menu').getByRole('menuitem', { name: 'Properties' }).click();
+    const text = (await page.locator('.properties .coords').innerText()).trim();
+    await page.locator('.properties-header button').click();
+    return text;
+  }
+
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/');
+    await page.waitForSelector('.map canvas', { timeout: 30_000 });
+    await page.waitForTimeout(1500);
+  });
+
+  test('§2–4 a polyline started near a point starts exactly on it', async ({ page }) => {
+    const { ox, oy } = await center(page);
+    await tool(page, 'Point');
+    await page.mouse.click(ox, oy);
+    await expect(status(page)).toContainText('Point created');
+
+    await tool(page, 'Polyline');
+    await page.mouse.move(ox + 20, oy + 20);
+    await page.mouse.move(ox + 5, oy + 4, { steps: 4 }); // ~6 px away: inside the 10 px snap distance
+    await expect(snapLabel(page)).toHaveText('SNAP · endpoint');
+    await page.mouse.click(ox + 5, oy + 4);
+    await page.mouse.click(ox + 150, oy + 80);
+    await page.keyboard.press('Enter');
+    await expect(status(page)).toContainText('Polyline created');
+
+    const point = await coordsOf(page, ox, oy);
+    const line = await coordsOf(page, ox + 75, oy + 40);
+    expect(line.split('\n')[0]!.trim(), 'first vertex must equal the point exactly').toBe(point);
+  });
+
+  test('§2 beyond 10 px nothing snaps and the click lands at the cursor', async ({ page }) => {
+    const { ox, oy } = await center(page);
+    await tool(page, 'Point');
+    await page.mouse.click(ox, oy);
+    await tool(page, 'Polyline');
+    await page.mouse.move(ox + 30, oy, { steps: 4 });
+    await page.mouse.move(ox + 14, oy, { steps: 4 });
+    await expect(snapLabel(page)).toHaveText('SNAP');
+  });
+
+  test('§1 circle centre snaps; its circumference point does not', async ({ page }) => {
+    const { ox, oy } = await center(page);
+    await tool(page, 'Circle');
+    await page.mouse.click(ox, oy);
+    await page.mouse.click(ox + 60, oy);
+    await expect(status(page)).toContainText('Circle created');
+
+    await tool(page, 'Polyline');
+    await page.mouse.move(ox + 20, oy + 20);
+    await page.mouse.move(ox + 3, oy + 3, { steps: 4 });
+    await expect(snapLabel(page)).toHaveText('SNAP · centre');
+    await page.mouse.move(ox + 60, oy + 1, { steps: 4 });
+    await expect(snapLabel(page)).toHaveText('SNAP');
+  });
+
+  test('§5 F3 toggles snapping; Alt suspends it', async ({ page }) => {
+    const { ox, oy } = await center(page);
+    await tool(page, 'Point');
+    await page.mouse.click(ox, oy);
+    await tool(page, 'Polyline');
+    await page.mouse.move(ox + 20, oy + 20);
+    await page.mouse.move(ox + 4, oy + 3, { steps: 4 });
+    await expect(snapLabel(page)).toHaveText('SNAP · endpoint');
+
+    await page.keyboard.press('F3');
+    await expect(snapLabel(page)).toHaveText('SNAP OFF');
+    await page.keyboard.press('F3');
+    await expect(snapLabel(page)).toHaveText('SNAP · endpoint');
+
+    await page.keyboard.down('Alt');
+    await expect(snapLabel(page)).toHaveText('SNAP');
+    await page.keyboard.up('Alt');
+    await expect(snapLabel(page)).toHaveText('SNAP · endpoint');
+  });
+
+  test('§4 right-click in a drawing tool opens the menu instead of adding a vertex', async ({ page }) => {
+    const { ox, oy } = await center(page);
+    await drawPolyline(page, [[ox - 60, oy], [ox + 60, oy]]);
+    await page.mouse.move(ox, oy);
+    await page.mouse.click(ox, oy, { button: 'right' });
+    await expect(page.locator('.context-menu').getByRole('menuitem', { name: 'Properties' })).toBeVisible();
+    await expect(status(page)).not.toContainText('Not created');
+  });
+});
+
+/** knowledge/snapping-spec.md v2: the Snap menu and the modes beyond Endpoint/Centre. */
+test.describe('snapping spec v2', () => {
+  const snapLabel = (page: Page) => page.locator('.status-bar .snap');
+  const readout = (page: Page) => page.locator('.status-bar .coordinate');
+  const coordOf = async (page: Page) => {
+    const m = /E\s+([\d.-]+)\s+N\s+([\d.-]+)/.exec((await readout(page).textContent()) ?? '');
+    return m ? [Number(m[1]), Number(m[2])] : [NaN, NaN];
+  };
+
+  async function openSnapMenu(page: Page) {
+    await page.locator('.snap-button').click();
+    await expect(page.locator('.snap-dropdown')).toBeVisible();
+  }
+
+  async function setModes(page: Page, ticked: string[]) {
+    await openSnapMenu(page);
+    for (const label of ['Endpoint', 'Midpoint', 'Centre', 'Intersection', 'Perpendicular', 'Nearest']) {
+      const box = page.getByRole('checkbox', { name: label, exact: true });
+      if (await box.isDisabled()) continue;
+      if ((await box.isChecked()) !== ticked.includes(label)) await box.click();
+    }
+    await page.keyboard.press('Escape');
+  }
+
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/');
+    await page.evaluate(() => localStorage.removeItem('wcad.snapModes.v1'));
+    await page.reload();
+    await page.waitForSelector('.map canvas', { timeout: 30_000 });
+    await page.waitForTimeout(1500);
+  });
+
+  test('§7 menu: defaults, toggles stay open, Perpendicular greyed outside Polyline/Polygon, remembered', async ({ page }) => {
+    await openSnapMenu(page);
+    for (const [label, on] of [
+      ['Endpoint', true],
+      ['Midpoint', true],
+      ['Centre', true],
+      ['Intersection', true],
+      ['Nearest', false],
+    ] as const) {
+      await expect(page.getByRole('checkbox', { name: label, exact: true }), label).toBeChecked({ checked: on });
+    }
+    await expect(page.getByRole('checkbox', { name: 'Perpendicular', exact: true })).toBeDisabled();
+
+    await page.getByRole('checkbox', { name: 'Nearest', exact: true }).click();
+    await expect(page.locator('.snap-dropdown'), 'menu stays open after a toggle').toBeVisible();
+
+    // Esc closes only the menu; it must not reach the map.
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.snap-dropdown')).toHaveCount(0);
+
+    await tool(page, 'Polyline');
+    await openSnapMenu(page);
+    await expect(page.getByRole('checkbox', { name: 'Perpendicular', exact: true })).toBeEnabled();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('button', { name: 'Polyline', exact: true }), 'Esc on the menu kept the tool').toHaveClass(/active/);
+
+    await page.reload();
+    await page.waitForSelector('.map canvas');
+    await openSnapMenu(page);
+    await expect(page.getByRole('checkbox', { name: 'Nearest', exact: true }), 'remembered').toBeChecked();
+  });
+
+  test('Midpoint, Intersection, Perpendicular and Nearest snap to the right coordinates', async ({ page }) => {
+    const { ox, oy } = await center(page);
+    await drawPolyline(page, [[ox - 150, oy], [ox + 50, oy]]); // horizontal, midpoint at ox-50
+    await drawPolyline(page, [[ox + 10, oy - 110], [ox + 10, oy + 100]]); // vertical, crosses at ox+10
+
+    await tool(page, 'Polyline');
+    await page.mouse.move(ox - 30, oy + 30);
+
+    // Midpoint
+    await page.mouse.move(ox - 48, oy + 2, { steps: 4 });
+    await expect(snapLabel(page)).toHaveText('SNAP · midpoint');
+    const mid = await coordOf(page);
+
+    // Intersection (Midpoint off, so the vertical line's midpoint cannot win)
+    await setModes(page, ['Endpoint', 'Centre', 'Intersection']);
+    await page.mouse.move(ox + 30, oy + 30);
+    await page.mouse.move(ox + 12, oy + 2, { steps: 4 });
+    await expect(snapLabel(page)).toHaveText('SNAP · intersection');
+    const [ix, iy] = await coordOf(page);
+    expect(iy).toBeCloseTo(mid[1]!, 3); // on the horizontal line
+
+    // Perpendicular from a placed vertex
+    await setModes(page, ['Perpendicular']);
+    await page.mouse.move(ox - 100, oy - 80);
+    const start = await coordOf(page);
+    await page.mouse.click(ox - 100, oy - 80);
+    await page.mouse.move(ox - 96, oy + 3, { steps: 4 });
+    await expect(snapLabel(page)).toHaveText('SNAP · perpendicular');
+    const [px, py] = await coordOf(page);
+    expect(px).toBeCloseTo(start[0]!, 3);
+    expect(py).toBeCloseTo(mid[1]!, 3);
+    await page.keyboard.press('Escape');
+
+    // Nearest
+    await setModes(page, ['Nearest']);
+    await tool(page, 'Polyline');
+    await page.mouse.move(ox - 120, oy + 30);
+    await page.mouse.move(ox - 120, oy + 3, { steps: 4 });
+    await expect(snapLabel(page)).toHaveText('SNAP · nearest');
+    expect((await coordOf(page))[1]).toBeCloseTo(mid[1]!, 3);
+    expect(ix).toBeGreaterThan(mid[0]!);
+    void px;
+  });
+});

@@ -9,9 +9,15 @@ workers), designed for millions of CAD objects and 50–500 users on-prem. Licen
 
 ## Specifications (read before changing related code)
 
+**Start every session by reading [knowledge/project-status.md](knowledge/project-status.md)** —
+current phase, open items, known limitations and a session log. Update it before ending a session
+that changed any of those.
+
 | Topic | File |
 |---|---|
+| Project status, open items, handoff | [knowledge/project-status.md](knowledge/project-status.md) |
 | Selection, Pan tool, right-click menu, keyboard | [knowledge/selection-spec.md](knowledge/selection-spec.md) |
+| Snapping while drawing | [knowledge/snapping-spec.md](knowledge/snapping-spec.md) |
 | Architecture and principles P1–P6, guardrails G1–G4 | [docs/CAD-GIS-Web-App-Architecture.md](docs/CAD-GIS-Web-App-Architecture.md) |
 | Phases, exit criteria, budgets | [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md) |
 

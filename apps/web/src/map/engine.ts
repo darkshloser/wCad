@@ -10,15 +10,16 @@
 import { Feature, Map as OlMap, View } from 'ol';
 import type { FeatureLike } from 'ol/Feature';
 import type MapBrowserEvent from 'ol/MapBrowserEvent';
-import { Circle as CircleGeom, LineString, MultiPoint, Point, Polygon } from 'ol/geom';
-import { DragPan, Draw, Snap } from 'ol/interaction';
+import { Circle as CircleGeom, LineString, MultiLineString, MultiPoint, Point, Polygon } from 'ol/geom';
+import { DragPan, Draw } from 'ol/interaction';
+import Interaction from 'ol/interaction/Interaction';
 import PointerInteraction from 'ol/interaction/Pointer';
 import { Vector as VectorLayer } from 'ol/layer';
 import TileLayer from 'ol/layer/Tile';
 import { Vector as VectorSource } from 'ol/source';
 import OSM from 'ol/source/OSM';
 import { Circle as CircleStyle, Fill, RegularShape, Stroke, Style } from 'ol/style';
-import { Collection } from 'ol';
+import { createEditingStyle } from 'ol/style/Style';
 import { get as getProjection } from 'ol/proj';
 import { register } from 'ol/proj/proj4';
 import proj4 from 'proj4';
@@ -59,6 +60,21 @@ import {
   keyAction,
   selectionVertices,
 } from './toolRules.ts';
+import {
+  CACHE_RADIUS_PX,
+  CACHE_REFRESH_MARGIN_PX,
+  DEFAULT_SNAP_MODES,
+  SNAP_DISTANCE_PX,
+  type SnapGeom,
+  type SnapMode,
+  type SnapTarget,
+  cacheCovers,
+  findSnap,
+  perpendicularAvailable,
+  snapActive,
+  snapGeomFrom,
+  snapStatusLabel,
+} from './snapping.ts';
 
 export type { ToolName } from './toolRules.ts';
 
@@ -77,6 +93,14 @@ export interface EngineEvents {
   onRequestTool(tool: ToolName): void;
   onElementsChanged(): void;
   onStatus(message: string): void;
+  /** Snapping on/off and the status-bar text (snapping spec §5, §8). */
+  onSnapState(state: SnapState): void;
+}
+
+export interface SnapState {
+  readonly enabled: boolean;
+  /** `SNAP`, `SNAP OFF` or `SNAP · <mode>`. */
+  readonly label: string;
 }
 
 export type ContextMenuRequest =
@@ -146,6 +170,36 @@ const SKETCH_STYLE = new Style({
   }),
 });
 
+const SNAP_COLOR = '#22c55e';
+
+// The single active snap target (snapping spec §5): one marker shape per mode, AutoCAD-style. A
+// snapped Point object is redrawn as a bigger dot instead of a square.
+const SNAP_STROKE = new Stroke({ color: SNAP_COLOR, width: 2.5 });
+const SNAP_FILL = new Fill({ color: 'rgba(34, 197, 94, 0.15)' });
+const SNAP_POINT_STYLE = new Style({
+  image: new CircleStyle({
+    radius: 8,
+    fill: new Fill({ color: SNAP_COLOR }),
+    stroke: new Stroke({ color: '#ffffff', width: 2 }),
+  }),
+});
+const SNAP_ENDPOINT_STYLE = new Style({
+  image: new RegularShape({ points: 4, radius: 9, angle: Math.PI / 4, fill: SNAP_FILL, stroke: SNAP_STROKE }),
+});
+const SNAP_MIDPOINT_STYLE = new Style({
+  image: new RegularShape({ points: 3, radius: 10, angle: 0, fill: SNAP_FILL, stroke: SNAP_STROKE }),
+});
+const SNAP_CENTRE_STYLE = [
+  new Style({ image: new CircleStyle({ radius: 8, fill: SNAP_FILL, stroke: SNAP_STROKE }) }),
+  new Style({ image: new CircleStyle({ radius: 2.5, fill: new Fill({ color: SNAP_COLOR }) }) }),
+];
+const SNAP_INTERSECTION_STYLE = new Style({
+  image: new RegularShape({ points: 4, radius: 9, radius2: 0, angle: Math.PI / 4, stroke: SNAP_STROKE }),
+});
+
+// OpenLayers' default sketch styles, reused so only the snapped cursor changes.
+const DRAW_EDITING_STYLE = createEditingStyle();
+
 const WORKING_Z = 10;
 
 /** State of a left-button gesture in Select mode, from press to release. */
@@ -177,10 +231,20 @@ export class CadEngine {
   #workingSource = new VectorSource<Feature>();
   #workingLayer: VectorLayer<VectorSource<Feature>>;
   #sketchSource = new VectorSource<Feature>();
-  #snapCollection = new Collection<Feature>();
+  #snapIndicatorSource = new VectorSource<Feature>();
   #draw: Draw | null = null;
   #sketching = false;
-  #snap: Snap;
+  #snapInteraction: Interaction;
+  #snapEnabled = true;
+  #altHeld = false;
+  #snapTarget: SnapTarget | null = null;
+  #snapCache: { window: [number, number, number, number]; geoms: SnapGeom[] } | null = null;
+  #snapModes: Set<SnapMode> = new Set(DEFAULT_SNAP_MODES);
+  /** The shape being drawn, for the Perpendicular reference point (spec §2). */
+  #sketchFeature: Feature | null = null;
+  #snapFetchSeq = 0;
+  #snapFetching = false;
+  #lastPixel: [number, number] | null = null;
   #dragPan: DragPan | undefined;
   #selectInteraction: PointerInteraction;
   #gesture: SelectGesture | null = null;
@@ -222,6 +286,7 @@ export class CadEngine {
     // from the store on every pan, and a highlight stored on a feature would vanish with it.
     this.#workingLayer = new VectorLayer({ source: this.#workingSource, style: this.#styleFor });
     const sketchLayer = new VectorLayer({ source: this.#sketchSource, style: SKETCH_STYLE });
+    const snapLayer = new VectorLayer({ source: this.#snapIndicatorSource, style: snapIndicatorStyle });
 
     const projection = getProjection(this.#crsCode) ?? undefined;
     const def = defaultRegistry.get(this.#crsCode);
@@ -255,7 +320,8 @@ export class CadEngine {
 
     this.#workingLayer.setZIndex(WORKING_Z);
     sketchLayer.setZIndex(25);
-    layers.push(this.#workingLayer, sketchLayer);
+    snapLayer.setZIndex(30);
+    layers.push(this.#workingLayer, sketchLayer, snapLayer);
 
     this.#map = new OlMap({
       target,
@@ -272,11 +338,13 @@ export class CadEngine {
       .getArray()
       .find((i): i is DragPan => i instanceof DragPan);
 
-    // Snap candidates are deliberately NOT drawn. Rendering every nearby vertex as a marker looked
-    // exactly like a selection the user never made (spec §6). Draw's own cursor already shows the
-    // single snapped position while drawing.
-    this.#snap = new Snap({ features: this.#snapCollection });
-    this.#map.addInteraction(this.#snap);
+    // Our own snapping (knowledge/snapping-spec.md) instead of OpenLayers' Snap: the spec needs a
+    // screen-pixel distance with a tie rule, exact stored coordinates, one visible target, F3/Alt,
+    // and the Arc tool — which listens to map clicks — snapping the same way as Draw.
+    // Like OpenLayers' Snap, it rewrites the event's coordinate before Draw sees it, so the point
+    // Draw stores is the target's exact coordinate, not the mouse position.
+    this.#snapInteraction = new Interaction({ handleEvent: this.#applySnap });
+    this.#map.addInteraction(this.#snapInteraction);
 
     this.#selectInteraction = new PointerInteraction({
       handleDownEvent: this.#onSelectDown,
@@ -298,8 +366,11 @@ export class CadEngine {
     viewport.addEventListener('pointerdown', this.#onViewportDown);
     window.addEventListener('pointerup', this.#onViewportUp);
     document.addEventListener('keydown', this.#onKeyDown);
+    document.addEventListener('keyup', this.#onKeyUp);
+    window.addEventListener('blur', this.#onWindowBlur);
 
     this.setTool(DEFAULT_TOOL);
+    this.#emitSnapState();
     void this.#reloadViewport();
   }
 
@@ -341,8 +412,8 @@ export class CadEngine {
 
     this.#dragPan?.setActive(tool !== 'select');
     this.#selectInteraction.setActive(tool === 'select');
-    this.#snap.setActive(drawing);
-    if (!drawing) this.#snapCollection.clear();
+    this.#snapInteraction.setActive(drawing);
+    this.#setSnapTarget(null);
 
     this.#setCursor(tool === 'pan' ? 'grab' : tool === 'select' ? 'default' : 'crosshair');
     this.#events.onStatus(TOOL_GUIDE[tool]);
@@ -357,23 +428,41 @@ export class CadEngine {
       source: this.#workingSource,
       type,
       stopClick: true,
+      // Left button only. OpenLayers' default accepts ANY button, so a right-click meant to open
+      // the object menu added a vertex instead (selection spec §4). Alt is allowed on purpose:
+      // Alt+click is how the user places a point with snapping suspended (snapping spec §5).
+      condition: (e) => {
+        const o = e.originalEvent as PointerEvent;
+        return o.button === 0 && !o.ctrlKey && !o.metaKey && !o.shiftKey;
+      },
+      // OpenLayers draws its sketch cursor above every layer, which hid the snap marker. While a
+      // target is active the cursor is not drawn, so the one thing shown is the target (spec §3).
+      style: (feature) => {
+        const geomType = feature.getGeometry()?.getType() ?? 'Point';
+        if (geomType === 'Point' && this.#snapTarget) return [];
+        return DRAW_EDITING_STYLE[geomType] ?? DRAW_EDITING_STYLE['Point']!;
+      },
       ...(tool === 'line' ? { minPoints: 2 } : {}),
       ...(tool === 'polygon' ? { minPoints: 3 } : {}),
     });
-    this.#draw.on('drawstart', () => {
+    this.#draw.on('drawstart', (evt) => {
+      this.#sketchFeature = evt.feature as Feature;
       this.#sketching = true;
     });
     this.#draw.on('drawabort', () => {
+      this.#sketchFeature = null;
       this.#sketching = false;
     });
     this.#draw.on('drawend', (evt) => {
+      this.#sketchFeature = null;
       this.#sketching = false;
       void this.#persistDrawn(evt.feature as Feature);
     });
     this.#map.addInteraction(this.#draw);
-    // Snap must be added after Draw so it processes pointer events first.
-    this.#map.removeInteraction(this.#snap);
-    this.#map.addInteraction(this.#snap);
+    // Snapping must be added after Draw: OpenLayers hands events to the most recently added
+    // interaction first, so the coordinate is already snapped when Draw reads it.
+    this.#map.removeInteraction(this.#snapInteraction);
+    this.#map.addInteraction(this.#snapInteraction);
   }
 
   /**
@@ -457,6 +546,8 @@ export class CadEngine {
   dispose(): void {
     this.#perf.stop();
     document.removeEventListener('keydown', this.#onKeyDown);
+    document.removeEventListener('keyup', this.#onKeyUp);
+    window.removeEventListener('blur', this.#onWindowBlur);
     window.removeEventListener('pointerup', this.#onViewportUp);
     const viewport = this.#map.getViewport();
     viewport.removeEventListener('contextmenu', this.#onContextMenu);
@@ -611,19 +702,191 @@ export class CadEngine {
   // ---------------------------------------------------------------------------- other input
 
   #onPointerMove = (evt: MapBrowserEvent): void => {
-    const c = evt.coordinate;
+    // Map listeners run BEFORE interactions in OpenLayers, so the snapping interaction has not yet
+    // rewritten this event: resolve the snap here too, so the coordinate readout, the target
+    // indicator and the arc preview all show where a click would actually land.
+    this.#lastPixel = [evt.pixel[0]!, evt.pixel[1]!];
+    const target = isDrawingTool(this.#tool) ? this.#resolveSnap(evt.pixel, altKeyOf(evt)) : null;
+    this.#setSnapTarget(target);
+    const c = target ? [target.x, target.y] : evt.coordinate;
     this.#events.onPointerMove([c[0]!, c[1]!, 0]);
 
     // Hover highlights in every tool, so the user sees what a right-click will act on (spec §3.3).
     if (!evt.dragging && !this.#gesture) this.#setHover(this.#hitAt(evt.pixel));
     if (!isDrawingTool(this.#tool)) return;
     if (this.#tool === 'arc3') this.#renderArcSketch([c[0]!, c[1]!, 0]);
-    void this.#refreshSnapCandidates();
+    this.#ensureSnapCandidates(evt.coordinate);
   };
 
   /** Map clicks matter only to the arc tool; Select uses its own gesture, Pan ignores clicks. */
   #onClick = (evt: MapBrowserEvent): void => {
-    if (this.#tool === 'arc3') this.#onArcPoint([evt.coordinate[0]!, evt.coordinate[1]!, 0]);
+    if (this.#tool !== 'arc3') return;
+    // Runs before the snapping interaction (see #onPointerMove), so snap explicitly.
+    const target = this.#resolveSnap(evt.pixel, altKeyOf(evt));
+    const c = target ? [target.x, target.y] : evt.coordinate;
+    this.#onArcPoint([c[0]!, c[1]!, 0]);
+  };
+
+  // ---------------------------------------------------------------------------- snapping
+
+  /**
+   * The snapping interaction: rewrites each event's coordinate to the active target's exact
+   * stored coordinate before Draw handles it (snapping spec §4). Always lets the event continue.
+   */
+  #applySnap = (evt: MapBrowserEvent): boolean => {
+    if (!evt.pixel || !evt.coordinate) return true;
+    const target = this.#resolveSnap(evt.pixel, altKeyOf(evt));
+    if (target) {
+      evt.coordinate = [target.x, target.y];
+      evt.pixel = this.#map.getPixelFromCoordinate(evt.coordinate);
+    }
+    return true;
+  };
+
+  /** The active target at a pixel, or null (spec §3, §8). Synchronous: reads the geometry cache. */
+  #resolveSnap(pixel: number[], altKey: boolean): SnapTarget | null {
+    if (!isDrawingTool(this.#tool)) return null;
+    if (!snapActive({ enabled: this.#snapEnabled, altHeld: altKey || this.#altHeld })) return null;
+    const cache = this.#snapCache;
+    if (!cache || cache.geoms.length === 0) return null;
+    const cursor = this.#map.getCoordinateFromPixel(pixel);
+    if (!cursor) return null;
+    const res = this.#map.getView().getResolution() ?? 1;
+    return findSnap(cache.geoms, {
+      cursor: [cursor[0]!, cursor[1]!],
+      // Screen pixels → CRS units at this zoom: the same 10 px at every zoom level.
+      tolerance: SNAP_DISTANCE_PX * res,
+      modes: this.#snapModes,
+      reference: perpendicularAvailable(this.#tool) ? this.#sketchReference() : null,
+    });
+  }
+
+  /**
+   * The last placed vertex of the polyline/polygon being drawn, or null before the first click.
+   * OpenLayers keeps the moving cursor as the sketch's final coordinate (and a polygon ring also
+   * repeats its first vertex), so the last PLACED vertex sits just before those.
+   */
+  #sketchReference(): [number, number] | null {
+    const geom = this.#sketchFeature?.getGeometry();
+    let c: number[] | undefined;
+    if (geom instanceof LineString) {
+      const coords = geom.getCoordinates();
+      c = coords.length >= 2 ? coords[coords.length - 2] : undefined;
+    } else if (geom instanceof Polygon) {
+      const ring = geom.getCoordinates()[0] ?? [];
+      c = ring.length >= 3 ? ring[ring.length - 3] : undefined;
+    }
+    return c ? [c[0]!, c[1]!] : null;
+  }
+
+  /** Sets the ticked snap modes (spec §7). */
+  setSnapModes(modes: ReadonlySet<SnapMode>): void {
+    this.#snapModes = new Set(modes);
+    this.#refreshSnapAtCursor();
+  }
+
+  /** Snapping master switch, from the Snap menu (spec §7, §8). */
+  setSnapEnabled(enabled: boolean): void {
+    if (enabled !== this.#snapEnabled) this.toggleSnap();
+  }
+
+  /** Shows exactly one target, or none (spec §3), and reports it to the status bar. */
+  #setSnapTarget(target: SnapTarget | null): void {
+    const prev = this.#snapTarget;
+    const same =
+      prev === target ||
+      (prev && target && prev.elementId === target.elementId && prev.x === target.x && prev.y === target.y);
+    if (same) return;
+    this.#snapTarget = target;
+    this.#draw?.getOverlay().changed();
+    this.#snapIndicatorSource.clear();
+    if (target) {
+      const f = new Feature(new Point([target.x, target.y]));
+      f.set('snapStyle', target.elementKind === 'point' && target.mode === 'endpoint' ? 'point' : target.mode);
+      this.#snapIndicatorSource.addFeature(f);
+    }
+    this.#emitSnapState();
+  }
+
+  #emitSnapState(): void {
+    this.#events.onSnapState({
+      enabled: this.#snapEnabled,
+      label: snapStatusLabel(this.#snapEnabled, this.#snapTarget),
+    });
+  }
+
+  /** Re-evaluates the target at the last cursor position, e.g. after F3, Alt or new candidates. */
+  #refreshSnapAtCursor(): void {
+    this.#setSnapTarget(this.#lastPixel ? this.#resolveSnap(this.#lastPixel, false) : null);
+  }
+
+  /** Toggles snapping (F3, spec §5). */
+  toggleSnap(): void {
+    this.#snapEnabled = !this.#snapEnabled;
+    this.#refreshSnapAtCursor();
+    this.#emitSnapState();
+    this.#events.onStatus(this.#snapEnabled ? 'Snapping on (F3).' : 'Snapping off (F3).');
+  }
+
+  /**
+   * Keeps the candidate cache covering the cursor. Candidates are fetched around the CURSOR —
+   * the previous implementation looked around the screen centre, so snapping silently failed
+   * anywhere near the edges of the view.
+   */
+  #ensureSnapCandidates(cursor: number[]): void {
+    const res = this.#map.getView().getResolution() ?? 1;
+    const at: [number, number] = [cursor[0]!, cursor[1]!];
+    if (cacheCovers(this.#snapCache?.window ?? null, at, CACHE_REFRESH_MARGIN_PX * res)) return;
+    if (this.#snapFetching) return;
+    void this.#fetchSnapCandidates(at, res);
+  }
+
+  async #fetchSnapCandidates(at: [number, number], res: number): Promise<void> {
+    const seq = ++this.#snapFetchSeq;
+    this.#snapFetching = true;
+    try {
+      const r = CACHE_RADIUS_PX * res;
+      const window: [number, number, number, number] = [at[0] - r, at[1] - r, at[0] + r, at[1] + r];
+      // Whole exact geometry, not just vertices: Midpoint, Intersection, Perpendicular and Nearest
+      // all need segments and true curves.
+      const records = await this.#store.queryBBox(this.#projectId, window);
+      if (seq !== this.#snapFetchSeq) return; // superseded by a newer fetch or an invalidation
+      const geoms: SnapGeom[] = [];
+      for (const rec of records) {
+        const g = snapGeomFrom(rec);
+        if (g) geoms.push(g);
+      }
+      this.#snapCache = { window, geoms };
+      this.#refreshSnapAtCursor();
+    } finally {
+      if (seq === this.#snapFetchSeq) this.#snapFetching = false;
+    }
+  }
+
+  /** Data or view changed: drop the cache and refetch at the cursor. */
+  #invalidateSnapCache(): void {
+    this.#snapCache = null;
+    this.#snapFetchSeq++;
+    this.#snapFetching = false;
+    if (isDrawingTool(this.#tool) && this.#lastPixel) {
+      const at = this.#map.getCoordinateFromPixel(this.#lastPixel);
+      if (at) this.#ensureSnapCandidates(at);
+    }
+  }
+
+  #onKeyUp = (e: KeyboardEvent): void => {
+    if (e.key === 'Alt' && this.#altHeld) {
+      this.#altHeld = false;
+      this.#refreshSnapAtCursor();
+    }
+  };
+
+  #onWindowBlur = (): void => {
+    // A key released while the window was not focused never sends keyup.
+    if (this.#altHeld) {
+      this.#altHeld = false;
+      this.#refreshSnapAtCursor();
+    }
   };
 
   #onViewportDown = (e: PointerEvent): void => {
@@ -660,8 +923,24 @@ export class CadEngine {
   };
 
   #onKeyDown = (e: KeyboardEvent): void => {
-    const action = keyAction(e.key, (e.target as HTMLElement | null)?.tagName);
+    const tag = (e.target as HTMLElement | null)?.tagName;
+    if (e.key === 'Alt' && isDrawingTool(this.#tool)) {
+      // Held Alt suspends snapping (spec §5). preventDefault stops the browser menu taking focus.
+      e.preventDefault();
+      if (!this.#altHeld) {
+        this.#altHeld = true;
+        this.#setSnapTarget(null);
+      }
+      return;
+    }
+    const action = keyAction(e.key, tag);
     if (!action) return;
+
+    if (action === 'toggle-snap') {
+      e.preventDefault(); // F3 is the browser's "find next"
+      this.toggleSnap();
+      return;
+    }
 
     if (action === 'cancel') {
       this.#events.onContextMenu(null);
@@ -890,35 +1169,46 @@ export class CadEngine {
       const feature = toFeature(rec, tolerance);
       if (feature) this.#workingSource.addFeature(feature);
     }
+    // New, deleted or moved-into-view objects, or a new zoom: cached snap candidates are stale.
+    this.#invalidateSnapCache();
     this.#events.onElementsChanged();
   }
+}
 
-  /**
-   * Snap candidates come from the store, bounded and proximity-ordered, and are held in a small
-   * collection rather than pointing Snap at the whole drawing (architecture doc section 6.2).
-   * They feed the Snap interaction only and are never rendered.
-   */
-  async #refreshSnapCandidates(): Promise<void> {
-    const view = this.#map.getView();
-    const centerCoord = view.getCenter();
-    if (!centerCoord) return;
-    const res = view.getResolution() ?? 1;
-    const margin = res * 200;
-    const bbox: [number, number, number, number] = [
-      centerCoord[0]! - margin,
-      centerCoord[1]! - margin,
-      centerCoord[0]! + margin,
-      centerCoord[1]! + margin,
-    ];
-    const candidates = await this.#store.snapCandidates(this.#projectId, bbox, 500);
-    if (!isDrawingTool(this.#tool)) return;
-    this.#snapCollection.clear();
-    for (const c of candidates) {
-      const f = new Feature(new Point([c.x, c.y]));
-      f.set('role', c.role);
-      this.#snapCollection.push(f);
+/** Style of the single snap indicator (spec §5). Resolution-aware shapes are built in pixels. */
+function snapIndicatorStyle(feature: FeatureLike, resolution: number): Style | Style[] {
+  const kind = feature.get('snapStyle') as SnapMode | 'point';
+  switch (kind) {
+    case 'point':
+      return SNAP_POINT_STYLE;
+    case 'midpoint':
+      return SNAP_MIDPOINT_STYLE;
+    case 'centre':
+      return SNAP_CENTRE_STYLE;
+    case 'intersection':
+      return SNAP_INTERSECTION_STYLE;
+    case 'perpendicular':
+    case 'nearest': {
+      const c = (feature.getGeometry() as Point).getCoordinates();
+      const px = (dx: number, dy: number) => [c[0]! + dx * resolution, c[1]! + dy * resolution];
+      const lines =
+        kind === 'perpendicular'
+          ? // Right-angle symbol: an L with the small square in its corner.
+            [
+              [px(-8, 9), px(-8, -8), px(9, -8)],
+              [px(-8, -2), px(-2, -2), px(-2, -8)],
+            ]
+          : // Hourglass.
+            [[px(-7, 8), px(7, 8), px(-7, -8), px(7, -8), px(-7, 8)]];
+      return new Style({ geometry: new MultiLineString(lines), stroke: SNAP_STROKE });
     }
+    default:
+      return SNAP_ENDPOINT_STYLE;
   }
+}
+
+function altKeyOf(evt: MapBrowserEvent): boolean {
+  return Boolean((evt.originalEvent as { altKey?: boolean } | undefined)?.altKey);
 }
 
 /** Highlight for a selected object: halo, coloured outline, and markers on its real vertices. */

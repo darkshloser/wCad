@@ -20,6 +20,8 @@ export function StatusBar(props: {
   crs: string;
   elementCount: number;
   selectedCount?: number;
+  /** `SNAP`, `SNAP OFF` or `SNAP · endpoint` / `SNAP · centre` (snapping spec §3, §5). */
+  snapLabel?: string;
   perf?: PerfSnapshot | null;
 }) {
   const perf = props.perf;
@@ -56,6 +58,14 @@ export function StatusBar(props: {
       )}
       <span className="coordinate">{props.coordinate}</span>
       <span className="crs">{props.crs}</span>
+      {props.snapLabel && (
+        <span
+          className={`snap ${props.snapLabel === 'SNAP OFF' ? 'off' : props.snapLabel.includes('·') ? 'active' : ''}`}
+          title="F3 toggles snapping; hold Alt to suspend it"
+        >
+          {props.snapLabel}
+        </span>
+      )}
       {(props.selectedCount ?? 0) > 0 && <span className="selection">{props.selectedCount} selected</span>}
       <span className="count">{props.elementCount} elements</span>
     </footer>

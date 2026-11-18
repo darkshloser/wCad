@@ -10,6 +10,8 @@
 import { defaultRegistry } from '@wcad/geo-core';
 import type { ReactNode } from 'react';
 import type { ToolName } from '../map/engine.ts';
+import type { SnapMode } from '../map/snapping.ts';
+import { SnapMenu } from './SnapMenu.tsx';
 
 const TOOLS: Array<{ id: ToolName; label: string; hint: string; icon?: ReactNode }> = [
   { id: 'pan', label: 'Pan', hint: 'Drag to move the map, wheel to zoom (default tool).', icon: <HandIcon /> },
@@ -58,6 +60,12 @@ export function Toolbar(props: {
   onFinish: () => void;
   onAbort: () => void;
   onZoomToData: () => void;
+  snap: {
+    enabled: boolean;
+    modes: ReadonlySet<SnapMode>;
+    onEnabled: (on: boolean) => void;
+    onModes: (modes: Set<SnapMode>) => void;
+  };
 }) {
   return (
     <header className="toolbar">
@@ -85,6 +93,13 @@ export function Toolbar(props: {
           Cancel
         </button>
         <button onClick={props.onZoomToData}>Zoom to data</button>
+        <SnapMenu
+          tool={props.tool}
+          enabled={props.snap.enabled}
+          modes={props.snap.modes}
+          onEnabled={props.snap.onEnabled}
+          onModes={props.snap.onModes}
+        />
       </div>
 
       <div className="group">
