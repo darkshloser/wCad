@@ -3,7 +3,7 @@
 Read this at the start of a session to pick up where the last one stopped. Update it at the end of
 any session that changes status, decisions or open items.
 
-Last updated: 2026-11-18.
+Last updated: 2026-11-19.
 
 ---
 
@@ -43,6 +43,10 @@ Last updated: 2026-11-18.
 
 ## Web client (apps/web) — current behaviour
 
+- **Pages:** `/` landing page, `/register` registration page, `/app` the CAD application
+  (`src/routes.ts`, `src/Root.tsx`, `src/landing/`). **No authentication yet:** Sign in goes
+  straight to `/app`; the register form only validates and stores nothing.
+
 - Toolbar: **Pan** (default), **Select**, Point, **Line**, Polyline, Polygon, Circle, Arc (3 pt).
 - Line tool: see [line-tool-spec.md](line-tool-spec.md) (implemented, awaiting review). AutoCAD-style
   chain; each segment is an independent 2-vertex `line` object. Rules in `src/map/lineChain.ts`.
@@ -62,6 +66,12 @@ Last updated: 2026-11-18.
   logged to the browser console and the last one shows on hover over "N tile errors".
 
 ## Known limitations
+
+- **No authentication or access control.** Anyone who can reach the server can open `/app` and
+  read any project's tiles. Agreed next step: authentication and project rights (Keycloak/OIDC,
+  owner/editor/viewer/geometry-viewer, attributes separable from geometry, enforcement in the
+  database, GDPR tooling) — plan proposed 2026-11-19; spec `knowledge/access-control-spec.md` to be
+  written and approved first.
 
 - Objects drawn in the app live only in browser memory (`MemoryStore`); a page reload loses them.
 - Only drawn (working-set) objects are selectable; imported backdrop objects need Phase 4.
@@ -92,3 +102,5 @@ Last updated: 2026-11-18.
   product owner: Line drawing modes and geometric construction operations.
 - 2026-11-18: Unified in-progress drawing style (option B) for Point, Line, Polyline, Polygon,
   Circle and Arc, replacing OpenLayers' default sketch style and the old gold dashed sketch.
+- 2026-11-19: Landing page (dark, CAD/GIS motifs) and separate Register page; the CAD app moved to
+  `/app` and is loaded lazily. E2E specs now open `/app`; new `e2e/landing.spec.ts`.

@@ -74,6 +74,10 @@ Standalone tile service with a three-tier cache: Valkey (hot) → filesystem (co
 
 Tiled backdrop layer (`renderMode: 'hybrid'`) carrying the millions of objects, hit-testing filtered to the working set so a click can never select quantized tile geometry, and always-visible performance instrumentation in the status bar.
 
+#### Pages
+
+`/` is the public landing page, `/register` the registration page and `/app` the CAD application. Authentication isn't built yet: **Sign in** goes straight to `/app`, and the registration form only checks its input.
+
 #### Toolbar actions
 
 Selection behaviour is specified in [knowledge/selection-spec.md](knowledge/selection-spec.md); that spec is the source of truth.

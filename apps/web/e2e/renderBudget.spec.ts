@@ -30,7 +30,7 @@ const HEADLESS_FPS_FLOOR = 24;
 
 test.describe('render budgets', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForSelector('.map canvas', { timeout: 30_000 });
     // Let tile loading and the first render settle before measuring.
     await page.waitForTimeout(3000);

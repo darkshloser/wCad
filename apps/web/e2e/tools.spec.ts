@@ -88,7 +88,7 @@ async function colourNear(page: Page, x: number, y: number, kind: 'selection' | 
 
 test.describe('selection spec', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForSelector('.map canvas', { timeout: 30_000 });
     await page.waitForTimeout(1500);
   });
@@ -384,7 +384,7 @@ test.describe('snapping spec', () => {
   }
 
   test.beforeEach(async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForSelector('.map canvas', { timeout: 30_000 });
     await page.waitForTimeout(1500);
   });
@@ -489,7 +489,7 @@ test.describe('snapping spec v2', () => {
   }
 
   test.beforeEach(async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.evaluate(() => localStorage.removeItem('wcad.snapModes.v1'));
     await page.reload();
     await page.waitForSelector('.map canvas', { timeout: 30_000 });
@@ -588,7 +588,7 @@ test.describe('line tool', () => {
   }
 
   test.beforeEach(async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForSelector('.map canvas', { timeout: 30_000 });
     await page.waitForTimeout(1500);
   });
